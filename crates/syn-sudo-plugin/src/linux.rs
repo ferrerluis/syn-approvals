@@ -20,6 +20,8 @@ use syn_protocol::{
 };
 use zeroize::Zeroizing;
 
+use crate::cancellation::{self, SignalGuard, IO_SLICE};
+
 const SUDO_API_VERSION: c_uint = (1 << 16) | 22;
 const SUDO_APPROVAL_PLUGIN: c_uint = 4;
 const MAX_ENTRY_BYTES: usize = 8192;
@@ -256,42 +258,43 @@ unsafe extern "C" fn plugin_check(
             .map_err(|_| "internal request verification failed")?;
 
         hard_notice("Waiting for Syn approval on your Mac…\n");
+        let signals = SignalGuard::install()?;
         let started = Instant::now();
         let timeout = Duration::from_secs(config.timeout_seconds);
-        match exchange_with_agent(&config, &signed_request, started + timeout) {
+        let outcome = (|| match exchange_with_agent(&config, &signed_request, started + timeout) {
             Ok(AgentReply::Decision(signed_decision)) => {
                 let approval_key = read_verifying_key(&config.approval_public_key)?;
                 let denial_key = read_verifying_key(&config.denial_public_key)?;
-                match evaluate_decision(
+                evaluate_decision(
                     &signed_decision,
                     &verified_request,
                     &approval_key,
                     &denial_key,
                     started,
                     timeout,
-                )? {
-                    DecisionOutcome::Approve => Ok(1),
-                    DecisionOutcome::Expired => fallback_or_deny(&state, &config, &policy),
-                    DecisionOutcome::Deny => {
-                        hard_notice("Syn denied this sudo invocation.\n");
-                        Ok(0)
-                    }
-                }
+                )
             }
             Ok(AgentReply::Unavailable) | Err(ExchangeError::Unavailable) => {
-                wait_until_timeout(started, config.timeout_seconds);
-                fallback_or_deny(&state, &config, &policy)
+                cancellation::wait_until(started + timeout);
+                Ok(DecisionOutcome::Expired)
             }
             Err(ExchangeError::Invalid) => Err("Syn received a malformed agent response"),
+        })();
+        // Restore sudo's signal handlers before any PAM conversation. A
+        // canceled wait is final and must never become password fallback.
+        if signals.finish() {
+            hard_notice("Syn invocation canceled. Nothing was approved.\n");
+            return Ok(0);
+        }
+        match outcome? {
+            DecisionOutcome::Approve => Ok(1),
+            DecisionOutcome::Expired => fallback_or_deny(&state, &config, &policy),
+            DecisionOutcome::Deny => {
+                hard_notice("Syn denied this sudo invocation.\n");
+                Ok(0)
+            }
         }
     })
-}
-
-fn wait_until_timeout(started: Instant, timeout_seconds: u64) {
-    let deadline = Duration::from_secs(timeout_seconds);
-    if let Some(remaining) = deadline.checked_sub(started.elapsed()) {
-        std::thread::sleep(remaining);
-    }
 }
 
 fn decision_is_timely(elapsed: Duration, deadline: Duration) -> bool {
@@ -455,6 +458,7 @@ fn exchange_with_agent(
 }
 
 fn remaining(deadline: Instant) -> std::io::Result<Duration> {
+    cancellation::check()?;
     deadline
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
@@ -463,7 +467,7 @@ fn remaining(deadline: Instant) -> std::io::Result<Duration> {
 
 fn connect_until(path: &Path, deadline: Instant) -> std::io::Result<UnixStream> {
     let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
-    socket.connect_timeout(&SockAddr::unix(path)?, remaining(deadline)?)?;
+    socket.connect_timeout(&SockAddr::unix(path)?, remaining(deadline)?.min(IO_SLICE))?;
     let fd: std::os::fd::OwnedFd = socket.into();
     Ok(fd.into())
 }
@@ -474,11 +478,20 @@ fn write_until(
     deadline: Instant,
 ) -> std::io::Result<()> {
     while !bytes.is_empty() {
-        stream.set_write_timeout(Some(remaining(deadline)?))?;
+        stream.set_write_timeout(Some(remaining(deadline)?.min(IO_SLICE)))?;
         match stream.write(bytes) {
             Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
             Ok(count) => bytes = &bytes[count..],
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
             Err(error) => return Err(error),
         }
     }
@@ -493,14 +506,23 @@ fn read_until(
 ) -> std::io::Result<()> {
     let mut received = 0;
     while received < bytes.len() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
+        stream.set_read_timeout(Some(remaining(deadline)?.min(IO_SLICE)))?;
         match stream.read(&mut bytes[received..]) {
             Ok(0) if allow_empty_eof && received == 0 => {
                 return Err(std::io::ErrorKind::UnexpectedEof.into());
             }
             Ok(0) => return Err(std::io::ErrorKind::InvalidData.into()),
             Ok(count) => received += count,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
             Err(error) => return Err(error),
         }
     }
@@ -518,7 +540,7 @@ fn write_frame(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> std:
     write_until(stream, bytes, deadline)
 }
 
-fn read_frame(stream: &mut UnixStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_frame(stream: &mut UnixStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
     let mut length = [0_u8; 4];
     read_until(stream, &mut length, deadline, true)?;
     let length = u32::from_be_bytes(length) as usize;

@@ -7,6 +7,8 @@ This repository is a compiling security-alpha foundation, not a reviewed or depl
 - **Iteration 0, live validated:** explicit Nord Meshnet/Tailscale selection, exact local-interface and approver-address checks, a reboot-persistent recovery deadline, and one exact 30-second approval TTL. [Evidence and remaining limits](validation/2026-09-03-iteration-0.md).
 - **Validation Phases 1–2 passed:** committed source baseline, refreshed local checks, current Pi inventory, root-only sudo-state backup, verified recovery timer, and retained root access through the acceptance gate. The timer was canceled after the gate; sudo remains unchanged. [Evidence](validation/2026-09-04-phases-1-2.md).
 - **Validation Phases 3–4 passed:** clean native ARM64 build with system PAM development files, 29 Pi tests, explicit audited runtime dependencies, package reinstallation, and before/after authentication-state comparisons. Fresh ordinary password sudo passed; Syn remains unarmed. [Evidence](validation/2026-09-04-phases-3-4.md).
+- **Validation Phase 5 passed:** real synthetic Touch ID approvals, explicit denial, actual authentication cancellation, notification privacy/Review reopening, and stable signed-app restart without repeated Keychain permission. [Evidence](validation/2026-09-04-phases-5-6-progress.md).
+- **Validation Phase 6 passed:** final-build Mac approval executed the original real sudo invocation as root. Denial, Ctrl-C, malformed replies, 30-second non-interactive expiry, interactive PAM fallback, relay reconnection, and actual timed shadow recovery also passed on Ubuntu 26.04.1 ARM64. The original sudo/PAM/provider state is restored; fresh ordinary password sudo passed. Current checks pass 31 local Rust, 39 native Pi Rust, and 23 Swift tests. No passwordless rule was created. [Evidence](validation/2026-09-04-phases-5-6-progress.md).
 - **Design authority:** threat model, protocol, privacy rules, ADRs, recovery procedure, and adversarial test matrix.
 - **Protocol:** deterministic CBOR, COSE Sign1 ES256, typed sudo intent, exact request/decision binding, size limits, and shared Rust/Swift golden vectors.
 - **Relay:** root-only local socket input, target-signature verification, in-memory pending queue, cancellation, mutual TLS 1.3, binary WebSocket messages, exact approver keys, deadlines, and no command execution surface.
@@ -16,14 +18,11 @@ This repository is a compiling security-alpha foundation, not a reviewed or depl
 
 ## Not yet proven or complete
 
-- **Phases 5–6 are in progress, not passed.** A pinned connection and root-signed synthetic request reached the Mac review UI. Live Deny stalled on Keychain permission; revised signing/cancellation paths pass 16 Swift tests but need live revalidation. The updated native package is installed and the rootless relay runs with unchanged sudo settings. Keychain authorization still needs the user; no sudo plug-in registration or passwordless rule has been applied. [Current evidence and remaining gates](validation/2026-09-04-phases-5-6-progress.md).
-
-- The sudo plug-in has been built, linked, and unit-tested natively on the Ubuntu 26.04 ARM64 Pi, but not loaded into a real `sudo.ws` invocation.
-- The PAM fallback has not been exercised with the real Ubuntu common-auth stack.
-- The transactional installer and `dpkg-statoverride` recovery have not been fault-injected on the target OS.
+- The sudo plug-in and real Ubuntu PAM fallback have been exercised in shadow mode. Passwordless policy coupling and alternate-provider restrictions have not been armed or fault-injected.
+- Normal installation and `dpkg-statoverride` recovery still need target testing; completed shadow recovery does not prove that separate path.
 - Pairing uses a manually transferred, root-approved profile and transport identity. The planned QR/custom-URL `/v1/pair` exchange is not implemented end to end.
-- Secure Enclave signing compiles, but fresh Touch ID/login-password behavior must be device-tested in the signed app bundle.
-- The Debian package has been built and installed on Ubuntu 26.04 ARM64 without arming Syn. Actual sudo restoration and interrupted-install recovery still require live testing; the completed timer test used a harmless action and a pre-install reboot.
+- Fresh Secure Enclave approval with Touch ID and system cancellation passed on the Mac. Mac login-password fallback and automatic dismissal of an untouched expired prompt still need live tests.
+- The Debian package is staged on Ubuntu 26.04 ARM64. Actual shadow sudo restoration passed through both manual and timed recovery; interrupted passwordless installation and recovery after arming remain untested.
 - No Developer ID signing, notarization, SBOM, reproducible-build proof, independent review, sudo-rs RFC, or 1Password research run has occurred.
 
 ## Release state

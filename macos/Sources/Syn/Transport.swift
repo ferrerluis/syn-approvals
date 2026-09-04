@@ -7,12 +7,33 @@ enum TransportError: Error, LocalizedError {
     case invalidPin
     case missingClientIdentity(String)
     case unexpectedMessage
+    case clientAuthorizationIncomplete
 
     var errorDescription: String? {
         switch self {
         case .invalidPin: "The target TLS certificate does not match its pinned fingerprint"
         case let .missingClientIdentity(label): "The client identity \(label) is missing from Keychain"
         case .unexpectedMessage: "The target sent an unsupported WebSocket message"
+        case .clientAuthorizationIncomplete: "Secure connection setup was interrupted after certificate verification. Finish any Syn Keychain permission, then choose Retry. Automatic retries are paused."
+        }
+    }
+
+    var requiresUserRetry: Bool { true }
+}
+
+final class HandshakeProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var checked = false
+    private var trusted = false
+    private var ready = false
+
+    func recordTrust(_ accepted: Bool) { lock.withLock { checked = true; trusted = accepted } }
+    func recordReady() { lock.withLock { ready = true } }
+    func classified(_ error: Error) -> Error {
+        lock.withLock {
+            if checked && !trusted { return TransportError.invalidPin }
+            if trusted && !ready { return TransportError.clientAuthorizationIncomplete }
+            return error
         }
     }
 }
@@ -25,6 +46,8 @@ final class TargetConnection {
     private let onMessage: @Sendable (Result<WireMessage, Error>) -> Void
     private var connection: NWConnection?
     private var connectionDeadline: Task<Void, Never>?
+    private var handshake = HandshakeProgress()
+    static let setupTimeoutSeconds: Double = 130
 
     init(target: TargetRecord, onMessage: @escaping @Sendable (Result<WireMessage, Error>) -> Void) {
         self.target = target
@@ -45,9 +68,13 @@ final class TargetConnection {
         sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, hostname)
         sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
         let pin = target.serverCertificateSHA256Hex
+        let handshake = HandshakeProgress()
+        self.handshake = handshake
         sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { @Sendable _, trust, complete in
             let trustRef = sec_trust_copy_ref(trust).takeRetainedValue()
-            complete(Self.verifyTrust(trustRef, hostname: hostname, pin: pin))
+            let accepted = Self.verifyTrust(trustRef, hostname: hostname, pin: pin)
+            handshake.recordTrust(accepted)
+            complete(accepted)
         }, DispatchQueue(label: "org.syn-approvals.tls-verification"))
 
         let parameters = NWParameters(tls: tls)
@@ -62,6 +89,7 @@ final class TargetConnection {
                 guard let self, let connection, self.connection === connection else { return }
                 switch state {
                 case .ready:
+                    handshake.recordReady()
                     self.connectionDeadline?.cancel()
                     self.connectionDeadline = nil
                     self.receiveNext(connection)
@@ -74,7 +102,7 @@ final class TargetConnection {
             }
         }
         connectionDeadline = Task { [weak self, weak connection] in
-            do { try await Task.sleep(for: .seconds(20)) }
+            do { try await Task.sleep(for: .seconds(Self.setupTimeoutSeconds)) }
             catch { return }
             guard let self, let connection, self.connection === connection else { return }
             self.fail(URLError(.timedOut))
@@ -105,12 +133,12 @@ final class TargetConnection {
     }
 
     private func receiveNext(_ connection: NWConnection) {
-        connection.receiveMessage { [weak self, weak connection] data, context, _, error in
+        connection.receiveMessage { [weak self, weak connection] data, context, isComplete, error in
             Task { @MainActor in
                 guard let self, let connection, self.connection === connection else { return }
                 if let error { self.fail(error); return }
                 guard let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata else {
-                    self.fail(TransportError.unexpectedMessage)
+                    self.fail(Self.missingMetadataError(data: data, isComplete: isComplete))
                     return
                 }
                 switch metadata.opcode {
@@ -128,9 +156,19 @@ final class TargetConnection {
         }
     }
 
+    nonisolated static func missingMetadataError(data: Data?, isComplete: Bool) -> Error {
+        // Network.framework can finish a closed stream with no content or
+        // WebSocket metadata. That is ordinary disconnection, not a frame to
+        // approve. Nonempty, empty-but-present, or incomplete messages without
+        // WebSocket metadata still fail as protocol errors.
+        if data == nil && isComplete { return URLError(.networkConnectionLost) }
+        return TransportError.unexpectedMessage
+    }
+
     private func fail(_ error: Error) {
+        let classified = handshake.classified(error)
         stop()
-        onMessage(.failure(error))
+        onMessage(.failure(classified))
     }
 
     nonisolated static func verifyTrust(_ trust: SecTrust, hostname: String, pin: String) -> Bool {

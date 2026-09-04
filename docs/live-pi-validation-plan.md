@@ -202,7 +202,7 @@ If package staging changes sudo behavior, remove the staged package and fix the 
 
 ## Phase 5 — prove transport and approval without sudo
 
-**In progress on 2026-09-04 UTC; not passed.** The pinned connection and root-signed synthetic request reached the Mac review UI. Live Deny timed out behind a Keychain permission dialog; signing/UI fixes now pass 16 Swift tests, but actual Mac approval/denial still need proof. macOS Keychain permission requires user interaction that Computer Use cannot perform. No shadow sudo change has been applied. [Progress, fixes, and remaining gates](validation/2026-09-04-phases-5-6-progress.md).
+**Passed on 2026-09-04 UTC.** Live synthetic Touch ID approval, repeated fresh approval, explicit Deny, and actual system Cancel all passed. The stable signed app restarted and reconnected without another Keychain permission prompt; 22 Swift tests pass. Luis confirmed the notification hid command contents and Review reopened the closed Syn window; the Pi verified the resulting denial. [Progress, fixes, and remaining gates](validation/2026-09-04-phases-5-6-progress.md).
 
 Generate the target identity on the Pi and the approver identities in Syn.app. Transfer only public keys and the certificate-pinned profile through SSH.
 
@@ -225,7 +225,9 @@ No command is executed in this phase. A late, modified, wrong-target, or replaye
 
 This shadow phase tests the real sudo ABI while ordinary password authentication remains in force.
 
-The guarded command is `synctl --json install --user ferrerluis --shadow` (preview), followed by `--apply --acknowledge-console-recovery` only after Phase 5 passes. It writes recovery state before touching sudo.conf and leaves the provider alternative unchanged. The timer uses the same recovery command for shadow and normal installation; shadow recovery archives its state so later runs start clean. This new path is not yet live-validated.
+**Passed on 2026-09-04 UTC.** The final rebuilt plug-in and Mac app passed real sudo approval: request `81676b340460eb02156c53bba27627a9` executed the original `/usr/bin/id -u` invocation, returning root UID 0 and exit 0. Denial, Ctrl-C, malformed reply, 30-second non-interactive expiry, interactive PAM fallback, relay reconnection, and actual Pi-local automatic recovery also passed. Afterward, original sudo/PAM/provider state was verified restored and fresh ordinary password sudo passed. [Evidence](validation/2026-09-04-phases-5-6-progress.md). Phase 7 is a separate authorization gate; Syn remains unarmed.
+
+The guarded command is `synctl --json install --user ferrerluis --shadow` (preview), followed by `--apply --acknowledge-console-recovery` only after Phase 5 passes. It writes recovery state before touching sudo.conf and leaves the provider alternative unchanged. The timer uses the same recovery command for shadow and normal installation; shadow recovery archives its state so later runs start clean. Shadow apply, manual recovery, and automatic recovery are now live-validated.
 
 1. Re-arm the recovery timer.
 2. Select or invoke `sudo.ws` while preserving the original alternative in the install state.

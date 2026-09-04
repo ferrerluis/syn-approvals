@@ -10,6 +10,10 @@ final class SynModel: ObservableObject {
     @Published private(set) var pending: [VerifiedApprovalRequest] = []
     @Published private(set) var connectedTargets: Set<String> = []
     @Published private(set) var authenticatingRequests: Set<String> = []
+    @Published private(set) var connectionErrors: [String: String] = [:]
+    @Published private(set) var pausedConnections: Set<String> = []
+    @Published private(set) var preparingKeys = false
+    @Published private(set) var keysReady = false
     @Published var selectedRequestID: String?
     @Published var lastError: String?
     @Published var pairingProfileText = ""
@@ -17,7 +21,7 @@ final class SynModel: ObservableObject {
     var openMainWindow: (() -> Void)?
 
     private let store: TargetStore?
-    private let keyStore = SynKeyStore()
+    private let keyStore: SynKeyStore
     private let signer: any DecisionSigning
     private let servicesEnabled: Bool
     private let decisionSender: (@MainActor (WireMessage, String) async throws -> Void)?
@@ -25,13 +29,17 @@ final class SynModel: ObservableObject {
     private var connections: [String: TargetConnection] = [:]
     private var seenRequests: [String: (hash: Data, expiresAt: Date)] = [:]
     private var reconnectAttempts: [String: Int] = [:]
+    private var reconnectTasks: [String: Task<Void, Never>] = [:]
+    private var approvalCancellations: [String: ApprovalCancellation] = [:]
 
     init(
         startServices: Bool = true,
-        signer: any DecisionSigning = SynKeyStore(),
+        signer: (any DecisionSigning)? = nil,
         decisionSender: (@MainActor (WireMessage, String) async throws -> Void)? = nil
     ) {
-        self.signer = signer
+        let keyStore = SynKeyStore()
+        self.keyStore = keyStore
+        self.signer = signer ?? keyStore
         servicesEnabled = startServices
         self.decisionSender = decisionSender
         guard startServices else { store = nil; return }
@@ -52,7 +60,9 @@ final class SynModel: ObservableObject {
             do { try await notifications.configure() }
             catch { lastError = "Notifications are unavailable: \(error.localizedDescription)" }
         }
-        connectAll()
+        if !targets.isEmpty {
+            Task { await prepareApproverIdentities(); if keysReady { connectAll() } }
+        }
     }
 
     var selectedRequest: VerifiedApprovalRequest? {
@@ -75,15 +85,26 @@ final class SynModel: ObservableObject {
             try store.save(targets + [target])
             targets.append(target)
             pairingProfileText = ""
-            connect(target)
+            Task {
+                if !keysReady { await prepareApproverIdentities() }
+                if keysReady { connect(target) }
+            }
         } catch {
             lastError = "Target import failed: \(error.localizedDescription)"
         }
     }
 
     func generateApproverIdentities() {
+        Task { await prepareApproverIdentities(); if keysReady { connectAll() } }
+    }
+
+    private func prepareApproverIdentities() async {
+        guard !preparingKeys else { return }
+        preparingKeys = true
+        defer { preparingKeys = false }
         do {
-            let identities = try keyStore.publicIdentities()
+            let keyStore = self.keyStore
+            let identities = try await Task.detached { try keyStore.publicIdentities() }.value
             let object: [String: Any] = [
                 "schema_version": 1,
                 "approval_public_key_x963_base64": identities.approval.base64EncodedString(),
@@ -93,7 +114,9 @@ final class SynModel: ObservableObject {
             ]
             let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
             approverIdentityText = String(decoding: data, as: UTF8.self)
+            keysReady = true
         } catch {
+            keysReady = false
             lastError = "Approver identities could not be created: \(error.localizedDescription)"
         }
     }
@@ -104,6 +127,9 @@ final class SynModel: ObservableObject {
     }
 
     func removeTarget(_ target: TargetRecord) {
+        reconnectTasks.removeValue(forKey: target.targetID)?.cancel()
+        pausedConnections.remove(target.targetID)
+        connectionErrors.removeValue(forKey: target.targetID)
         connections.removeValue(forKey: target.targetID)?.stop()
         targets.removeAll { $0.targetID == target.targetID }
         pending.removeAll { $0.targetID == target.targetID }
@@ -118,7 +144,12 @@ final class SynModel: ObservableObject {
     func approve(_ requestID: String) async {
         guard let request = pending.first(where: { $0.id == requestID }) else { return }
         guard authenticatingRequests.insert(requestID).inserted else { return }
-        defer { authenticatingRequests.remove(requestID) }
+        let cancellation = ApprovalCancellation()
+        approvalCancellations[requestID] = cancellation
+        defer {
+            authenticatingRequests.remove(requestID)
+            approvalCancellations.removeValue(forKey: requestID)?.cancel()
+        }
         guard !request.isExpired else {
             finish(request)
             lastError = "That approval request has expired."
@@ -130,7 +161,8 @@ final class SynModel: ObservableObject {
                 request: request,
                 approve: true,
                 reason: "Approve this one sudo invocation on \(target(for: request)?.displayName ?? request.targetID)",
-                signer: signer
+                signer: signer,
+                cancellation: cancellation
             )
         } catch {
             // Canceling or failing system authentication is a denial, not silence
@@ -202,7 +234,7 @@ final class SynModel: ObservableObject {
     }
 
     private func connectAll() {
-        for target in targets { connect(target) }
+        for target in targets where connections[target.targetID] == nil { connect(target) }
     }
 
     private func connect(_ target: TargetRecord) {
@@ -216,19 +248,20 @@ final class SynModel: ObservableObject {
     private func handle(_ result: Result<WireMessage, Error>, from target: TargetRecord) {
         switch result {
         case let .failure(error):
-            connectedTargets.remove(target.targetID)
-            lastError = "\(target.displayName) disconnected: \(error.localizedDescription)"
-            scheduleReconnect(target)
+            recordConnectionFailure(error, from: target)
         case let .success(message):
             do {
                 switch message.kind {
                 case .hello:
                     let map = try CBORCodec.decodeCanonical(message.body).integerKeyedMap()
-                    guard map[0]?.unsignedValue == 1, map[1]?.unsignedValue == 1,
+                    guard map.count == 3, map[0]?.unsignedValue == 1, map[1]?.unsignedValue == 1,
                           map[2]?.textValue == target.targetID else {
                         throw SynProtocolError.invalid("target hello did not match the pinned target")
                     }
                     connectedTargets.insert(target.targetID)
+                    connectionErrors.removeValue(forKey: target.targetID)
+                    pausedConnections.remove(target.targetID)
+                    reconnectTasks.removeValue(forKey: target.targetID)?.cancel()
                     reconnectAttempts[target.targetID] = 0
                     let hello = try CBORCodec.encode(.map([
                         (.unsigned(0), .unsigned(1)),
@@ -278,19 +311,45 @@ final class SynModel: ObservableObject {
     }
 
     private func scheduleReconnect(_ target: TargetRecord) {
+        guard servicesEnabled, !pausedConnections.contains(target.targetID) else { return }
+        reconnectTasks.removeValue(forKey: target.targetID)?.cancel()
         let attempt = min((reconnectAttempts[target.targetID] ?? 0) + 1, 10)
         reconnectAttempts[target.targetID] = attempt
         let base = min(pow(2.0, Double(attempt - 1)), 60)
         let jitter = Double.random(in: 0...(base * 0.2))
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(base + jitter))
+        reconnectTasks[target.targetID] = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(base + jitter)) }
+            catch { return }
             guard let self, self.targets.contains(target),
+                  !self.pausedConnections.contains(target.targetID),
                   !self.connectedTargets.contains(target.targetID) else { return }
             self.connections[target.targetID]?.start()
         }
     }
 
+    func recordConnectionFailure(_ error: Error, from target: TargetRecord) {
+        connectedTargets.remove(target.targetID)
+        connectionErrors[target.targetID] = error.localizedDescription
+        if let error = error as? TransportError, error.requiresUserRetry {
+            pausedConnections.insert(target.targetID)
+            reconnectTasks.removeValue(forKey: target.targetID)?.cancel()
+        } else {
+            scheduleReconnect(target)
+        }
+    }
+
+    func retryConnection(_ target: TargetRecord) {
+        guard keysReady else { return }
+        pausedConnections.remove(target.targetID)
+        connectionErrors.removeValue(forKey: target.targetID)
+        reconnectTasks.removeValue(forKey: target.targetID)?.cancel()
+        reconnectAttempts[target.targetID] = 0
+        if let connection = connections[target.targetID] { connection.start() }
+        else { connect(target) }
+    }
+
     private func finish(_ request: VerifiedApprovalRequest) {
+        approvalCancellations.removeValue(forKey: request.id)?.cancel()
         pending.removeAll { $0.id == request.id }
         if servicesEnabled { notifications.remove(requestID: request.id) }
         if selectedRequestID == request.id { selectedRequestID = pending.first?.id }
@@ -316,7 +375,7 @@ final class SynModel: ObservableObject {
         }
     }
 
-    private func pruneExpiredRequests() {
+    func pruneExpiredRequests() {
         for request in pending where request.isExpired { finish(request) }
         seenRequests = seenRequests.filter { $0.value.expiresAt > .now }
     }

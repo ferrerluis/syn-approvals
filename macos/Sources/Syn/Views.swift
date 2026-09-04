@@ -52,7 +52,7 @@ struct SynContentView: View {
                                 .fill(model.connectedTargets.contains(target.targetID) ? .green : .gray)
                                 .frame(width: 8, height: 8)
                             Text(target.displayName)
-                            Text(model.connectedTargets.contains(target.targetID) ? "Connected" : "Disconnected")
+                            Text(model.connectedTargets.contains(target.targetID) ? "Connected" : (model.pausedConnections.contains(target.targetID) ? "Retry needed" : "Disconnected"))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -168,9 +168,13 @@ private struct SetupView: View {
                     .font(.system(.caption, design: .monospaced))
                     .textSelection(.enabled)
                 HStack {
-                    Button("Generate identities") { model.generateApproverIdentities() }
+                    Button(model.preparingKeys ? "Preparing keys…" : "Prepare keys") { model.generateApproverIdentities() }
+                        .disabled(model.preparingKeys)
                     Button("Copy public identities") { model.copyApproverIdentities() }
+                        .disabled(!model.keysReady)
                 }
+                Text(model.keysReady ? "Keys ready. Each approval still requires fresh system authentication." : "Preparing keys may show setup-time Keychain permissions. No command approval countdown is running.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             Section("Pair a target") {
                 Text("Import the root-approved JSON profile produced during pairing. Syn rejects plain ws:// endpoints, invalid target keys, and malformed certificate pins.")
@@ -183,10 +187,19 @@ private struct SetupView: View {
             }
             Section("Targets") {
                 ForEach(model.targets) { target in
-                    HStack {
-                        Text(target.displayName)
-                        Spacer()
-                        Button("Remove", role: .destructive) { model.removeTarget(target) }
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text(target.displayName)
+                            Spacer()
+                            if !model.connectedTargets.contains(target.targetID) {
+                                Button("Retry connection") { model.retryConnection(target) }
+                                    .disabled(!model.keysReady)
+                            }
+                            Button("Remove", role: .destructive) { model.removeTarget(target) }
+                        }
+                        if let error = model.connectionErrors[target.targetID] {
+                            Text(error).font(.callout).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

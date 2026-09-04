@@ -23,13 +23,30 @@ use syn_protocol::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{broadcast, oneshot, Mutex, Semaphore};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tracing::{info, warn};
 
 const REQUEST_BROADCAST_CAPACITY: usize = 64;
+// Setup can need an initial macOS Keychain permission. This budget does not
+// extend the signed command's 30-second TTL or create an approval grant.
+const TLS_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_APPROVER_CONNECTIONS: usize = 4;
+
+#[cfg(test)]
+#[test]
+fn approver_connection_slots_are_bounded_and_released() {
+    let slots = Arc::new(Semaphore::new(MAX_APPROVER_CONNECTIONS));
+    let mut held = Vec::new();
+    for _ in 0..MAX_APPROVER_CONNECTIONS {
+        held.push(slots.clone().try_acquire_owned().unwrap());
+    }
+    assert!(slots.clone().try_acquire_owned().is_err());
+    drop(held.pop());
+    assert!(slots.clone().try_acquire_owned().is_ok());
+}
 
 pub struct Agent {
     config: AgentConfig,
@@ -109,15 +126,21 @@ impl Agent {
         let acceptor = self.tls_acceptor.clone();
         let approver_ip = self.config.approver_ip;
         let network_task = tokio::spawn(async move {
+            let slots = Arc::new(Semaphore::new(MAX_APPROVER_CONNECTIONS));
             loop {
                 let (stream, peer) = tcp_listener.accept().await?;
                 if !peer_ip_is_allowed(approver_ip, peer.ip()) {
                     warn!(%peer, expected_ip = %approver_ip, "unconfigured overlay peer rejected");
                     continue;
                 }
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    warn!(%peer, "approver connection limit reached");
+                    continue;
+                };
                 let state = network_state.clone();
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Err(error) = handle_network(stream, state, acceptor).await {
                         warn!(%peer, error = %error, "approver connection closed");
                     }
@@ -345,7 +368,7 @@ async fn handle_network(
     state: Arc<AgentState>,
     acceptor: TlsAcceptor,
 ) -> Result<()> {
-    let tls = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream))
+    let tls = tokio::time::timeout(TLS_SETUP_TIMEOUT, acceptor.accept(stream))
         .await
         .context("mutual TLS timed out")?
         .context("mutual TLS failed")?;

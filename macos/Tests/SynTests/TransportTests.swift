@@ -4,6 +4,41 @@ import Security
 import Testing
 @testable import Syn
 
+@Test func completedEmptyTransportCallbackReconnectsButMalformedContentDoesNot() {
+    let closed = TargetConnection.missingMetadataError(data: nil, isComplete: true) as? URLError
+    #expect(closed?.code == .networkConnectionLost)
+    #expect(TargetConnection.missingMetadataError(data: nil, isComplete: false) is TransportError)
+    #expect(TargetConnection.missingMetadataError(data: Data(), isComplete: true) is TransportError)
+    #expect(TargetConnection.missingMetadataError(data: Data([0xff]), isComplete: true) is TransportError)
+}
+
+@Test @MainActor func interruptedTLSAuthorizationPausesButNetworkFailureDoesNot() throws {
+    let target = TargetRecord(
+        targetID: "test", displayName: "test", webSocketURL: try #require(URL(string: "wss://test.example:41781")),
+        targetPublicKeyBase64: "", serverCertificateSHA256Hex: "", clientIdentityLabel: "test"
+    )
+    let progress = HandshakeProgress()
+    let model = SynModel(startServices: false)
+    let offline = progress.classified(URLError(.notConnectedToInternet))
+    model.recordConnectionFailure(offline, from: target)
+    #expect(model.pausedConnections.isEmpty)
+    #expect(model.lastError == nil) // Connection errors are inline, not stale modal alerts.
+    progress.recordTrust(true)
+    let interrupted = progress.classified(URLError(.timedOut))
+    model.recordConnectionFailure(interrupted, from: target)
+    #expect(model.pausedConnections.contains("test"))
+    #expect(model.connectionErrors["test"]?.contains("Automatic retries are paused") == true)
+    progress.recordReady()
+    #expect(progress.classified(URLError(.networkConnectionLost)) is URLError)
+}
+
+@Test func failedTrustCannotBecomeAnAutomaticRetry() {
+    let progress = HandshakeProgress()
+    progress.recordTrust(false)
+    let error = progress.classified(URLError(.secureConnectionFailed)) as? TransportError
+    #expect(error?.requiresUserRetry == true)
+}
+
 @Test func pinnedTrustRejectsWrongPinWrongHostAndExpiredCertificate() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("syn-tls-test-\(UUID())")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])

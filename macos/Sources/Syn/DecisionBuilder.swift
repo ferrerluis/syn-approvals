@@ -8,7 +8,8 @@ enum DecisionBuilder {
         request: VerifiedApprovalRequest,
         approve: Bool,
         reason: String,
-        signer: any DecisionSigning
+        signer: any DecisionSigning,
+        cancellation: ApprovalCancellation = ApprovalCancellation()
     ) async throws -> Data {
         try await Task.detached {
             let publicKey = try approve ? signer.approvalPublicKey() : signer.denialPublicKey()
@@ -17,7 +18,7 @@ enum DecisionBuilder {
             let header = try SynProtocol.protectedHeader(keyID: keyID)
             let input = try SynProtocol.signatureStructure(protected: header, payload: payload)
             let signed = try approve
-                ? signer.signApproval(payload: input, reason: reason)
+                ? signer.signApproval(payload: input, reason: reason, cancellation: cancellation)
                 : signer.signDenial(payload: input)
             guard signed.keyID == keyID else { throw SynProtocolError.invalid("decision key changed unexpectedly") }
             return try SynProtocol.coseSign1(payload: payload, keyID: keyID, signature: signed.signature)
