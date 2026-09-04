@@ -174,12 +174,14 @@ mod tests {
             let started = Instant::now();
             if blocked_read {
                 let (mut reader, _writer) = UnixStream::pair().unwrap();
-                let error =
-                    crate::linux::read_frame(&mut reader, started + Duration::from_secs(30))
-                        .unwrap_err();
+                let error = crate::linux::read_frame(
+                    &mut reader,
+                    started + Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS),
+                )
+                .unwrap_err();
                 assert_eq!(error.kind(), io::ErrorKind::Interrupted);
             } else {
-                wait_until(started + Duration::from_secs(30));
+                wait_until(started + Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS));
             }
             assert!(started.elapsed() < Duration::from_secs(2));
             sender.join().unwrap();

@@ -966,7 +966,7 @@ mod tests {
 
     #[test]
     fn decision_deadline_is_strict() {
-        let deadline = Duration::from_secs(30);
+        let deadline = Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS);
         assert!(decision_is_timely(
             deadline - Duration::from_nanos(1),
             deadline
@@ -993,7 +993,7 @@ mod tests {
         let signed_approval =
             hex::decode(fixture["signed_approval_hex"].as_str().unwrap()).unwrap();
         let signed_denial = hex::decode(fixture["signed_denial_hex"].as_str().unwrap()).unwrap();
-        let timeout = Duration::from_secs(30);
+        let timeout = Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS);
         let evaluate = |signed: &[u8], request: &VerifiedRequest, started| {
             evaluate_decision(
                 signed,
@@ -1065,7 +1065,10 @@ mod tests {
             }
             let signed_changed = sign_request(&changed, &target).unwrap();
             let verified_changed = verify_request(&signed_changed, target.verifying_key()).unwrap();
-            for started in [Instant::now(), Instant::now() - Duration::from_secs(30)] {
+            for started in [
+                Instant::now(),
+                Instant::now() - Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS),
+            ] {
                 assert!(
                     evaluate_decision(
                         &signed_approval,
@@ -1073,7 +1076,7 @@ mod tests {
                         approval.verifying_key(),
                         denial.verifying_key(),
                         started,
-                        Duration::from_secs(30)
+                        Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS)
                     )
                     .is_err(),
                     "{case} must hard-fail, not enter timeout fallback"

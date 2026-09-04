@@ -4,7 +4,7 @@
 | --- | --- |
 | Valid request + fresh user-presence approval | Execute original invocation once |
 | Explicit device-signed denial | Deny; no password fallback |
-| No response for 30 seconds, interactive | Invoke PAM fallback |
+| No response for 90 seconds, interactive | Invoke PAM fallback |
 | No response, non-interactive | Deny without prompt |
 | Modified request or decision | Hard deny |
 | Wrong target/request ID/hash | Hard deny |

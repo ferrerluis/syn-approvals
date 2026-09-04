@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const SUDO_ADAPTER_KIND: &str = "org.syn-approvals.sudo";
 pub const SUDO_SCHEMA_VERSION: u16 = 1;
-pub const DEFAULT_TTL_MS: u32 = 30_000;
+pub const DEFAULT_TTL_MS: u32 = 90_000;
 pub const MAX_WIRE_BYTES: usize = 64 * 1024;
 pub const ES256_ALGORITHM: i64 = -7;
 
@@ -176,7 +176,7 @@ impl ApprovalRequestV1 {
             return Err(validation("unsupported adapter kind or schema"));
         }
         if self.ttl_ms != DEFAULT_TTL_MS {
-            return Err(validation("private alpha TTL must be exactly 30 seconds"));
+            return Err(validation("private alpha TTL must be exactly 90 seconds"));
         }
         self.sudo.validate()
     }
@@ -805,10 +805,11 @@ mod tests {
         let key = generate_signing_key();
         let mut request =
             ApprovalRequestV1::new("pi-dev".into(), key.verifying_key(), sample_intent());
-        request.ttl_ms = DEFAULT_TTL_MS - 1;
-        assert!(request.validate().is_err());
-        request.ttl_ms = DEFAULT_TTL_MS + 1;
-        assert!(request.validate().is_err());
+        assert_eq!(request.ttl_ms, 90_000);
+        for ttl in [30_000, DEFAULT_TTL_MS - 1, DEFAULT_TTL_MS + 1] {
+            request.ttl_ms = ttl;
+            assert!(request.validate().is_err());
+        }
     }
 
     #[test]
@@ -818,6 +819,18 @@ mod tests {
         let target = SigningKey::from_slice(&[1; 32]).unwrap();
         let approval = SigningKey::from_slice(&[2; 32]).unwrap();
         let denial = SigningKey::from_slice(&[3; 32]).unwrap();
+        for (field, non_interactive) in [
+            ("signed_no_tty_request_hex", false),
+            ("signed_no_tty_noninteractive_request_hex", true),
+        ] {
+            let signed = hex::decode(fixture[field].as_str().unwrap()).unwrap();
+            let request = verify_request(&signed, target.verifying_key()).unwrap();
+            assert_eq!(request.request.sudo.tty, None);
+            assert_eq!(request.request.sudo.non_interactive, non_interactive);
+        }
+        let legacy_request =
+            hex::decode(fixture["legacy_30_second_request_hex"].as_str().unwrap()).unwrap();
+        assert!(verify_request(&legacy_request, target.verifying_key()).is_err());
         let request_bytes = hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap();
         let request = verify_request(&request_bytes, target.verifying_key()).unwrap();
         assert_eq!(

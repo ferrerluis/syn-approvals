@@ -1,7 +1,7 @@
 schema_version = 1
 managed_uid = 1000
 managed_user = "luis"
-timeout_seconds = 30
+timeout_seconds = 90
 max_pending = 16
 password_fallback_on_timeout = true
 allow_interactive_root = false

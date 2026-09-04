@@ -4,6 +4,8 @@ This repository is a compiling security-alpha foundation, not a reviewed or depl
 
 ## Delivered
 
+**Current validation (2026-09-04):** the approval window is 90 seconds throughout source, fixtures, examples, specifications, and deployed builds. All checks pass (37 local Rust, 47 Pi Rust, 24 Swift). Phases 9–10 passed, including live expiry/PAM fallback, native Codex's package reinstall, armed reboot with an unchanged rollback deadline, post-reboot recovery, guarded reinstallation, healthy-Syn rollback cancellation, and a final permanent-state approval. A real no-terminal parser defect was reproduced, fixed, and revalidated through native Codex. Syn is installed in Applications with launch at login enabled. The 30-second results below are historical. [Current validation ledger](validation/2026-09-04-phases-9-10.md).
+
 - **Iteration 0, live validated:** explicit Nord Meshnet/Tailscale selection, exact local-interface and approver-address checks, a reboot-persistent recovery deadline, and one exact 30-second approval TTL. [Evidence and remaining limits](validation/2026-09-03-iteration-0.md).
 - **Validation Phases 1–2 passed:** committed source baseline, refreshed local checks, current Pi inventory, root-only sudo-state backup, verified recovery timer, and retained root access through the acceptance gate. The timer was canceled after the gate; sudo remains unchanged. [Evidence](validation/2026-09-04-phases-1-2.md).
 - **Validation Phases 3–4 passed:** clean native ARM64 build with system PAM development files, 29 Pi tests, explicit audited runtime dependencies, package reinstallation, and before/after authentication-state comparisons. Fresh ordinary password sudo passed; Syn remains unarmed. [Evidence](validation/2026-09-04-phases-3-4.md).
@@ -20,8 +22,8 @@ This repository is a compiling security-alpha foundation, not a reviewed or depl
 
 ## Not yet proven or complete
 
-- Phases 9–10 remain: real package installation and Codex usage, package/provider upgrades, armed reboot, post-reboot recovery, and permanent enablement. The Phase 8 matrix does not substitute for those workflow and lifecycle checks.
-- Armed-mode missing-plug-in failure passed; unreadable/corrupted plug-ins and every interrupted-install boundary have not been separately fault-injected. Normal installation and stat-override recovery passed on the target, but upgrade behavior remains unproven.
+- Phases 9–10 passed. Syn and both sudo-provider reinstalls preserved enforcement and keys; no newer provider versions were available, so a newer-version upgrade is not claimed. Syn is intentionally enabled without the temporary timer after the required recovery/fallback gates and successful healthy-Syn cancellation. [Current evidence](validation/2026-09-04-phases-9-10.md).
+- Armed-mode missing and damaged plug-in failures passed. A permission-specific unreadable-file failure and every interrupted-install boundary have not been separately fault-injected.
 - Pairing uses a manually transferred, root-approved profile and transport identity. The planned QR/custom-URL `/v1/pair` exchange is not implemented end to end.
 - Fresh Secure Enclave approval with Touch ID and system cancellation passed in earlier phases; the Mac login-password path also passed in armed mode. Automatic dismissal of an untouched expired authentication prompt still needs dedicated live evidence.
 - The Debian package is installed on Ubuntu 26.04 ARM64. Actual shadow and normal-install timed recovery passed; interruption at every passwordless-install phase remains untested.

@@ -213,6 +213,9 @@ final class SynModel: ObservableObject {
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        // SMAppService is not observable; refresh its status-backed toggle
+        // after registration rather than waiting for an unrelated model change.
+        defer { objectWillChange.send() }
         do {
             if enabled { try SMAppService.mainApp.register() }
             else { try SMAppService.mainApp.unregister() }
@@ -272,6 +275,7 @@ final class SynModel: ObservableObject {
                     Task { try? await connection?.send(.init(kind: .hello, body: hello)) }
                 case .request:
                     let request = try SynProtocol.verifyRequest(message.body, target: target)
+                    // Future clock skew is bounded separately from the 90-second approval TTL.
                     guard !request.isExpired, request.issuedAt.timeIntervalSinceNow < 30 else {
                         throw SynProtocolError.invalid("request is expired or issued in the future")
                     }

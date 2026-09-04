@@ -31,7 +31,7 @@ use tracing::{info, warn};
 
 const REQUEST_BROADCAST_CAPACITY: usize = 64;
 // Setup can need an initial macOS Keychain permission. This budget does not
-// extend the signed command's 30-second TTL or create an approval grant.
+// extend the signed command's 90-second TTL or create an approval grant.
 const TLS_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_APPROVER_CONNECTIONS: usize = 4;
 
@@ -627,6 +627,15 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configuration_and_signed_request_deadlines_agree() {
+        assert_eq!(syn_config::APPROVAL_TIMEOUT_SECONDS, 90);
+        assert_eq!(
+            syn_config::APPROVAL_TIMEOUT_SECONDS * 1_000,
+            u64::from(syn_protocol::DEFAULT_TTL_MS)
+        );
+    }
+
     use super::*;
     use syn_protocol::{
         digest_environment, generate_signing_key, sign_decision, sign_request, ApprovalRequestV1,
@@ -738,7 +747,7 @@ mod tests {
     #[test]
     fn decision_deadline_is_strict() {
         let now = Instant::now();
-        let deadline = now + Duration::from_secs(30);
+        let deadline = now + Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS);
         assert!(decision_is_timely(
             deadline,
             deadline - Duration::from_nanos(1)

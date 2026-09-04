@@ -2,7 +2,7 @@
 
 Status: accepted.
 
-For the managed UID, Syn is attempted first. After exactly 30 seconds without a valid decision, an interactive terminal may authenticate through Ubuntu PAM.
+For the managed UID, Syn is attempted first. After exactly 90 seconds without a valid decision, an interactive terminal may authenticate through Ubuntu PAM.
 
 Fallback is forbidden after explicit denial, local policy denial, invalid signatures, replay, malformed data, wrong targets, unsupported versions, or cancellation. Non-interactive sudo never prompts.
 

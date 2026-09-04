@@ -5,7 +5,7 @@ Syn is a human-approval gate for privileged actions on remote development machin
 > [!WARNING]
 > Syn is a private security alpha. Do not install its sudo integration on a machine without console or recovery access. It has not received an independent security review.
 
-The code compiles and its portable protocol tests pass, but the privileged path has not yet been exercised on the real Pi target. Read [the implementation status](docs/implementation-status.md) before treating any milestone as complete.
+The privileged approval path has passed live Pi validation, but package/reboot lifecycle validation remains in progress. The approval window is 90 seconds; ordinary unavailability can then fall back to the Ubuntu password only in an interactive terminal. Read [the implementation status](docs/implementation-status.md) before treating any milestone as complete.
 
 ## What exists
 

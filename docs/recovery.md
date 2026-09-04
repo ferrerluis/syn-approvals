@@ -4,7 +4,7 @@ Read this before arming the sudo integration. Keep console or Ubuntu recovery ac
 
 ## Normal timeout fallback
 
-If no valid Mac decision arrives after 30 seconds, an interactive invocation asks for the normal Ubuntu password. Explicit denials and integrity errors do not fall back.
+If no valid Mac decision arrives after 90 seconds, an interactive invocation asks for the normal Ubuntu password. Explicit denials and integrity errors do not fall back.
 
 ## Recovery mode
 

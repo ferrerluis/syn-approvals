@@ -89,7 +89,7 @@ struct TargetRecord: Codable, Identifiable, Hashable, Sendable {
 
 enum SynProtocol {
     static let sudoAdapter = "org.syn-approvals.sudo"
-    static let approvalTTLMilliseconds: UInt64 = 30_000
+    static let approvalTTLMilliseconds: UInt64 = 90_000
 
     static func verifyRequest(_ signed: Data, target: TargetRecord) throws -> VerifiedApprovalRequest {
         guard let key = target.publicKey else { throw SynProtocolError.invalid("target public key is invalid") }
@@ -208,7 +208,12 @@ enum SynProtocol {
 
     private static func parseSudo(_ value: CBOR) throws -> ParsedSudo {
         let map = try value.integerKeyedMap()
-        guard map.count == 21,
+        // minicbor omits key 5 when Rust's Option<String> is None. All other
+        // fields remain required; accepting a missing TTY must not admit an
+        // unknown field or a missing identity/intent field.
+        let requiredKeys = Set((UInt64(0)...UInt64(20)).filter { $0 != 5 })
+        let keys = Set(map.keys)
+        guard keys == requiredKeys || keys == requiredKeys.union([5]),
               let invokingUID = uint32(map[0]),
               uint32(map[1]) != nil,
               let invokingUser = map[2]?.textValue,
@@ -286,8 +291,9 @@ enum SynProtocol {
     }
 
     private static func validOptionalText(_ value: CBOR?) -> Bool {
-        guard let value else { return false }
-        return value.isNull || value.textValue != nil
+        guard let value else { return true }
+        // A present null is not Rust's canonical encoding of None.
+        return value.textValue != nil
     }
 
     private static func integer(_ value: Int64) -> CBOR {

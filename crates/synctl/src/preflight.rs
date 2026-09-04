@@ -315,7 +315,7 @@ mod tests {
                 deadline,
             )
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS);
         assert!(evaluate(&signed, &request, deadline).is_ok());
         assert!(evaluate(&signed, &request, Instant::now()).is_err());
         assert!(evaluate(

@@ -12,7 +12,7 @@ pub const DEFAULT_INSTALL_STATE: &str = "/var/lib/syn/install-state.json";
 pub const DEFAULT_PAIRING_STATE: &str = "/var/lib/syn/pairing.json";
 pub const DEFAULT_SOCKET_PATH: &str = "/run/syn/agent.sock";
 pub const DEFAULT_LISTEN_PORT: u16 = 41_781;
-pub const APPROVAL_TIMEOUT_SECONDS: u64 = 30;
+pub const APPROVAL_TIMEOUT_SECONDS: u64 = 90;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -189,7 +189,7 @@ impl PluginConfig {
         }
         if self.timeout_seconds != APPROVAL_TIMEOUT_SECONDS {
             return Err(ConfigError::Invalid(
-                "private alpha timeout must be exactly 30 seconds".into(),
+                "private alpha timeout must be exactly 90 seconds".into(),
             ));
         }
         if self.pam_service != "syn-sudo-fallback" {
@@ -423,6 +423,23 @@ mod tests {
             ..Policy::default()
         };
         assert!(policy.validate().is_err());
+    }
+
+    #[test]
+    fn ninety_second_defaults_and_examples_reject_legacy_timeout() {
+        assert_eq!(Policy::default().timeout_seconds, 90);
+        let mut policy: Policy =
+            toml::from_str(include_str!("../../../packaging/examples/policy.toml")).unwrap();
+        let mut plugin: PluginConfig =
+            toml::from_str(include_str!("../../../packaging/examples/plugin.toml")).unwrap();
+        assert_eq!(policy.timeout_seconds, 90);
+        assert_eq!(plugin.timeout_seconds, 90);
+        policy.validate().unwrap();
+        plugin.validate().unwrap();
+        policy.timeout_seconds = 30;
+        plugin.timeout_seconds = 30;
+        assert!(policy.validate().is_err());
+        assert!(plugin.validate().is_err());
     }
 
     #[test]

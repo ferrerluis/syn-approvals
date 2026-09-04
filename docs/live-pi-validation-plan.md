@@ -29,7 +29,7 @@ Syn is ready for personal use only when all of these are true:
 - Normal `sudo` from SSH and Codex sends a clear approval request to the Mac.
 - One Mac approval runs one unchanged command. Repeating the command requires a new approval.
 - Rejecting, canceling, altering, or reusing a request never runs the command and never opens the Ubuntu password fallback.
-- If the Mac is simply unavailable for 30 seconds, an interactive terminal offers the normal Ubuntu password. A non-interactive command fails without prompting.
+- If the Mac is simply unavailable for 90 seconds, an interactive terminal offers the normal Ubuntu password. A non-interactive command fails without prompting.
 - Directly invoking `sudo-rs` cannot bypass Syn and become root.
 - If Syn's sudo plug-in is missing, unreadable, or damaged, sudo refuses the managed command instead of silently running it.
 - A timer running locally on the Pi can remove Syn's passwordless sudo rule and restore ordinary password sudo even when the Mac app and SSH connection are unavailable.
@@ -42,7 +42,7 @@ A successful build proves only that the source is valid enough for the compiler.
 
 Codex can run every test except the final Touch ID check:
 
-- Use the supplied Ubuntu password for initial setup and the 30-second fallback test.
+- Use the supplied Ubuntu password for initial setup and the 90-second fallback test.
 - Use the supplied Mac login password for Mac approval tests before the final Touch ID check.
 - Use Computer control to press Deny and cancel authentication in negative tests.
 - Ask Luis to perform one final Touch ID approval only after every password-based and failure-path test passes.
@@ -109,9 +109,9 @@ The initial installer rolled back its own immediate errors but lacked reboot-per
 
 Unit-test command construction and state transitions locally. Prove the timer first with a harmless marker action before trusting it with sudo recovery.
 
-### C. Reduce the approval wait to 30 seconds
+### C. Set the approval wait to 90 seconds
 
-The private alpha uses one exact 30-second approval TTL everywhere:
+The private alpha uses one exact 90-second approval TTL everywhere. This supersedes the earlier 30-second choice at the user's request on 2026-09-04; earlier validation reports remain historical evidence of that earlier build, not proof of the new timeout.
 
 - Rust configuration defaults and validation.
 - Request TTL, monotonic deadline, socket wait, and late-decision rejection.
@@ -119,7 +119,7 @@ The private alpha uses one exact 30-second approval TTL everywhere:
 - Mac request countdown and expiry display.
 - Golden vectors if the encoded TTL changes.
 
-Add boundary tests for a decision immediately before the 30-second deadline and a decision immediately after it. A decision arriving late must never race with or override the Ubuntu password fallback.
+Add boundary tests for a decision immediately before the 90-second deadline and a decision immediately after it. A decision arriving late must never race with or override the Ubuntu password fallback.
 
 ## Phase 1 — establish a clean repository baseline
 
@@ -278,7 +278,7 @@ Use commands with harmless effects until the security states pass:
 | Reuse | repeat the same command | a new request and new authentication |
 | Explicit denial | deny on Mac | deny immediately; no Ubuntu password |
 | Mac cancellation | cancel system authentication | no execution; terminal explains that Mac authentication was canceled and that rerunning sudo creates a new request |
-| Interactive absence | quit Syn.app, run with TTY | after 30 seconds, normal no-echo Ubuntu password prompt |
+| Interactive absence | quit Syn.app, run with TTY | after 90 seconds, normal no-echo Ubuntu password prompt |
 | Non-interactive absence | `sudo -n /usr/bin/true` | fail after expiry; no prompt |
 | Terminal cancellation | Ctrl-C while waiting | request cancellation; late approval rejected |
 | Local policy | `sudo -s`, `sudo -i`, configured shell/interpreter | hard deny before notification |
@@ -293,6 +293,8 @@ Re-arm the rollback timer before each destructive fault-injection subgroup. Rest
 
 ## Phase 9 — verify the real user experience
 
+**Passed on 2026-09-04 UTC.** Actual SSH installation and native Pi Codex reinstallation of `gh` both completed through ordinary sudo and fresh Mac approval. The native no-terminal path exposed a strict-parser bug; signed regression fixtures reproduced it, the parser was repaired without accepting missing required fields, and the actual Codex operation then exited 0. A final harmless command passed with user-confirmed Touch ID. [Evidence](validation/2026-09-04-phases-9-10.md).
+
 After the harmless matrix passes:
 
 1. From SSH, run a real narrowly scoped package operation such as installing `gh` if it is absent.
@@ -305,6 +307,8 @@ After the harmless matrix passes:
 The test must use ordinary `sudo`; no Syn wrapper, SSH forwarding, password injection, or privileged command endpoint is allowed.
 
 ## Phase 10 — upgrades, reboot, and recovery
+
+**Passed on 2026-09-04 UTC.** Syn and both provider reinstalls, an actual armed Pi reboot with the unchanged absolute deadline, automatic relay reconnection, fresh approval, post-reboot recovery/password sudo, and guarded reinstallation passed. Two consecutive post-reboot approvals and interactive/non-interactive 90-second fallback checks passed. After explicit confirmation, cancellation itself passed through healthy Syn-controlled sudo; doctor remained healthy without a timer and a fresh permanent-state approval returned UID 0. [Evidence and limits](validation/2026-09-04-phases-9-10.md).
 
 Only after the complete matrix passes:
 

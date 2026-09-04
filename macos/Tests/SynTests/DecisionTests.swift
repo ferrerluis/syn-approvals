@@ -64,7 +64,7 @@ private final class TestSigner: DecisionSigning, @unchecked Sendable {
     var approvalStarted: Bool { lock.withLock { approvalSigns > 0 } }
 }
 
-private func request(expiresIn: TimeInterval = 30, target: String = "test-target") -> VerifiedApprovalRequest {
+private func request(expiresIn: TimeInterval = 90, target: String = "test-target") -> VerifiedApprovalRequest {
     VerifiedApprovalRequest(
         signedBytes: Data(), payloadHash: Data(repeating: 1, count: 32),
         requestID: Data(repeating: 2, count: 16), nonce: Data(repeating: 3, count: 32),

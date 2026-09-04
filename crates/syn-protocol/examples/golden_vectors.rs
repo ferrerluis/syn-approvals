@@ -50,11 +50,26 @@ fn main() {
         adapter_kind: SUDO_ADAPTER_KIND.into(),
         adapter_schema_version: SUDO_SCHEMA_VERSION,
         issued_at_unix_ms: 1_700_000_000_000,
-        ttl_ms: 30_000,
+        ttl_ms: syn_protocol::DEFAULT_TTL_MS,
         sudo: intent,
     };
     let signed_request = sign_request(&request, &target).unwrap();
     let verified = verify_request(&signed_request, target.verifying_key()).unwrap();
+    let mut no_tty = request.clone();
+    no_tty.sudo.tty = None;
+    let signed_no_tty = sign_request(&no_tty, &target).unwrap();
+    let verified_no_tty = verify_request(&signed_no_tty, target.verifying_key()).unwrap();
+    assert_eq!(verified_no_tty.request.sudo.tty, None);
+    no_tty.sudo.non_interactive = true;
+    let signed_no_tty_noninteractive = sign_request(&no_tty, &target).unwrap();
+    // Negative cross-language vector: correctly signed, but obsolete alpha TTL.
+    let mut legacy_request = request.clone();
+    legacy_request.ttl_ms = 30_000;
+    let legacy_request = syn_protocol::sign_cose(
+        &syn_protocol::encode_canonical(&legacy_request).unwrap(),
+        &target,
+    )
+    .unwrap();
     let mut approval_decision = DecisionV1::for_request(
         &verified,
         DecisionAction::ApproveOnce,
@@ -76,6 +91,9 @@ fn main() {
         "approval_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(approval.verifying_key())),
         "denial_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(denial.verifying_key())),
         "signed_request_hex": hex::encode(signed_request),
+        "signed_no_tty_request_hex": hex::encode(signed_no_tty),
+        "signed_no_tty_noninteractive_request_hex": hex::encode(signed_no_tty_noninteractive),
+        "legacy_30_second_request_hex": hex::encode(legacy_request),
         "request_payload_hash_hex": hex::encode(verified.payload_hash),
         "signed_approval_hex": hex::encode(sign_decision(&approval_decision, &approval).unwrap()),
         "signed_denial_hex": hex::encode(sign_decision(&denial_decision, &denial).unwrap()),

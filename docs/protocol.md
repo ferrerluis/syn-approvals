@@ -2,6 +2,8 @@
 
 Status: private-alpha wire contract. Numeric map keys are part of the protocol.
 
+The current alpha requires a 90-second TTL. Earlier 30-second builds are incompatible and fail closed, even when their signatures are valid. Upgrade the target binaries/configuration and Mac app together while Syn is unarmed, then obtain fresh signed preflight evidence. The shared golden fixture includes a correctly signed legacy 30-second request that both implementations must reject.
+
 ## Encoding
 
 - Deterministic CBOR with definite lengths and integer map keys.
@@ -27,7 +29,7 @@ Status: private-alpha wire contract. Numeric map keys are part of the protocol.
 | 5 | adapter kind | text, initially `org.syn-approvals.sudo` |
 | 6 | adapter schema | unsigned, initially 1 |
 | 7 | issued at | signed Unix milliseconds, display only |
-| 8 | TTL | exactly 30000 milliseconds in the alpha |
+| 8 | TTL | exactly 90000 milliseconds in the alpha |
 | 9 | sudo intent | `SudoIntentV1` map |
 
 `SudoIntentV1` binds:
@@ -47,6 +49,13 @@ Status: private-alpha wire contract. Numeric map keys are part of the protocol.
 - typed risk markers.
 
 Byte strings are intentional. Unix argv and paths are not required to be valid UTF-8.
+
+The sudo map has twenty required keys (0–20 except 5). Key 5 is the optional
+TTY string: Rust/minicbor omits it when no terminal exists. It is not encoded
+as null. Receivers accept exactly the required set, with or without this one
+optional text field; unknown fields and missing required fields fail closed.
+Golden fixtures cover both non-interactive flag values with an absent TTY,
+which is common for Codex command execution without a PTY.
 
 ## Decision
 

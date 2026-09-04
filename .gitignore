@@ -12,3 +12,4 @@
 *.crt
 *.der
 .DS_Store
+__pycache__/

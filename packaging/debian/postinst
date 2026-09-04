@@ -13,4 +13,5 @@ install -d -o root -g root -m 0711 /var/lib/syn
 install -d -o root -g root -m 0700 /var/lib/syn/backups
 systemctl daemon-reload >/dev/null 2>&1 || true
 
-printf '%s\n' 'Syn is staged but not armed. Complete pairing and run synctl install --user NAME first without --apply.'
+printf '%s\n' 'Syn package installed. Run synctl doctor to check the current sudo enforcement state.'
+printf '%s\n' 'For a new setup, complete pairing and inspect synctl install --user NAME without --apply first.'
