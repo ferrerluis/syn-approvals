@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if ! getent group syn >/dev/null 2>&1; then
+    addgroup --system syn
+fi
+if ! getent passwd syn >/dev/null 2>&1; then
+    adduser --system --ingroup syn --no-create-home --home /nonexistent --shell /usr/sbin/nologin syn
+fi
+
+install -d -o root -g syn -m 0750 /etc/syn /etc/syn/keys /etc/syn/tls
+install -d -o root -g root -m 0711 /var/lib/syn
+install -d -o root -g root -m 0700 /var/lib/syn/backups
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+printf '%s\n' 'Syn is staged but not armed. Complete pairing and run synctl install --user NAME first without --apply.'

@@ -1,0 +1,25 @@
+[package]
+name = "syn-sudo-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "syn_approval"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc.workspace = true
+p256.workspace = true
+syn-config = { path = "../syn-config" }
+syn-protocol = { path = "../syn-protocol" }
+zeroize.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+serde_json.workspace = true

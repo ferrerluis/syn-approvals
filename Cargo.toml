@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/syn-agent",
+  "crates/syn-config",
+  "crates/syn-protocol",
+  "crates/syn-sim",
+  "crates/syn-sudo-plugin",
+  "crates/synctl",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ferrerluis/syn-approvals"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+hex = "0.4"
+http = "1.2"
+libc = "0.2"
+minicbor = { version = "0.26", features = ["alloc", "derive", "std"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem", "pkcs8"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+rustls = "0.23"
+rustls-pemfile = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+socket2 = "0.6"
+thiserror = "2.0"
+tokio = { version = "1.43", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = "0.26"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.12", features = ["v4"] }
+zeroize = "1.8"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

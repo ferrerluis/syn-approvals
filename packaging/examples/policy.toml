@@ -1,0 +1,13 @@
+schema_version = 1
+managed_uid = 1000
+managed_user = "luis"
+timeout_seconds = 30
+max_pending = 16
+password_fallback_on_timeout = true
+allow_interactive_root = false
+allowed_modes = ["run"]
+blocked_executables = [
+  "ash", "bash", "csh", "dash", "elvish", "env", "fish", "ion", "ksh",
+  "lua", "node", "perl", "python", "python3", "ruby", "sh", "su", "sudo",
+  "sudo-rs", "sudo.ws", "tcsh", "xonsh", "zsh",
+]

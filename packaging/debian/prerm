@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = remove ] && [ -e /etc/sudoers.d/90-syn-managed-user ]; then
+    printf '%s\n' 'Refusing removal while Syn NOPASSWD policy is armed.' >&2
+    printf '%s\n' 'Run: synctl uninstall --restore-local-sudo --apply' >&2
+    exit 1
+fi
+
+if [ "${1:-}" = remove ] && [ -e /var/lib/syn/recovery-deadline.json ]; then
+    printf '%s\n' 'Refusing removal while the Syn automatic recovery timer is armed.' >&2
+    printf '%s\n' 'Run the approved sudo health check, then: synctl recovery cancel --apply' >&2
+    exit 1
+fi
+
+exit 0

@@ -1,0 +1,14 @@
+/target/
+/.tools/
+/dist/
+/test-runs/
+/.build/
+/macos/.build/
+/macos/Syn.app/
+*.xcuserstate
+*.p12
+*.pem
+*.key
+*.crt
+*.der
+.DS_Store

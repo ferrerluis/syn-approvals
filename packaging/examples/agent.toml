@@ -1,0 +1,15 @@
+schema_version = 1
+target_id = "pi-development"
+# Choose tailscale or nord_meshnet. Bind only to the matching overlay interface.
+overlay = "nord_meshnet"
+listen = "100.64.0.10:41781"
+approver_ip = "100.64.0.11"
+unix_socket = "/run/syn/agent.sock"
+plugin_uid = 0
+max_pending = 16
+target_public_key = "/etc/syn/keys/target-public.pem"
+approval_public_key = "/etc/syn/keys/approval-public.pem"
+denial_public_key = "/etc/syn/keys/denial-public.pem"
+tls_certificate = "/etc/syn/tls/target-cert.pem"
+tls_private_key = "/etc/syn/tls/target-key.pem"
+client_ca_certificate = "/etc/syn/tls/approver-ca.pem"

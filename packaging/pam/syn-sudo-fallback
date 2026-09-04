@@ -1,0 +1,4 @@
+#%PAM-1.0
+# Syn invokes this service only after an interactive 30-second timeout.
+@include common-auth
+@include common-account
