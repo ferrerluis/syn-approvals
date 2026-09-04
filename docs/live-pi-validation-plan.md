@@ -123,6 +123,8 @@ Add boundary tests for a decision immediately before the 30-second deadline and 
 
 ## Phase 1 — establish a clean repository baseline
 
+**Passed on 2026-09-04 UTC.** Commit `0c48afc` was validated on local branch `validation/phases-1-2`; the full local check suite and ad-hoc signed app verification passed. [Evidence](validation/2026-09-04-phases-1-2.md).
+
 Before changing the Pi:
 
 1. Commit the current implementation on a local validation branch.
@@ -140,6 +142,8 @@ Before changing the Pi:
 If a check fails, fix that failure, add a regression test where practical, rerun the complete local suite, and use Computer control to inspect any affected Mac UI. Continue to Phase 2 only after the local suite passes; a failure creates another iteration rather than ending the project.
 
 ## Phase 2 — capture and prove Pi recovery state
+
+**Passed on 2026-09-04 UTC.** The root-only sudo backup was hashed and compared with live state, the 15-minute deadline was checked from root and ordinary-user sessions, and the retained root session survived the gate. The test timer was canceled afterward; re-arm it and refresh the backup before a later privileged change. [Backup location and evidence](validation/2026-09-04-phases-1-2.md).
 
 Start with read-only inventory over `ssh pi`:
 
