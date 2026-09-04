@@ -6,6 +6,7 @@ This repository is a compiling security-alpha foundation, not a reviewed or depl
 
 - **Iteration 0, live validated:** explicit Nord Meshnet/Tailscale selection, exact local-interface and approver-address checks, a reboot-persistent recovery deadline, and one exact 30-second approval TTL. [Evidence and remaining limits](validation/2026-09-03-iteration-0.md).
 - **Validation Phases 1–2 passed:** committed source baseline, refreshed local checks, current Pi inventory, root-only sudo-state backup, verified recovery timer, and retained root access through the acceptance gate. The timer was canceled after the gate; sudo remains unchanged. [Evidence](validation/2026-09-04-phases-1-2.md).
+- **Validation Phases 3–4 passed:** clean native ARM64 build with system PAM development files, 29 Pi tests, explicit audited runtime dependencies, package reinstallation, and before/after authentication-state comparisons. Fresh ordinary password sudo passed; Syn remains unarmed. [Evidence](validation/2026-09-04-phases-3-4.md).
 - **Design authority:** threat model, protocol, privacy rules, ADRs, recovery procedure, and adversarial test matrix.
 - **Protocol:** deterministic CBOR, COSE Sign1 ES256, typed sudo intent, exact request/decision binding, size limits, and shared Rust/Swift golden vectors.
 - **Relay:** root-only local socket input, target-signature verification, in-memory pending queue, cancellation, mutual TLS 1.3, binary WebSocket messages, exact approver keys, deadlines, and no command execution surface.

@@ -4,7 +4,7 @@ Section: admin
 Priority: optional
 Architecture: arm64
 Maintainer: Syn maintainers <security@syn-approvals.invalid>
-Depends: sudo (>= 1.9.17), libpam0g, libc6, iproute2
+Depends: sudo (>= 1.9.17), libpam0g (>= 0.99.7.1), libc6 (>= 2.39), libgcc-s1 (>= 4.2), iproute2
 Description: human approval gate for remote sudo invocations
  Syn stages a classic sudo approval plug-in, an unprivileged relay, and
  recovery tooling. The package does not create a NOPASSWD rule; an

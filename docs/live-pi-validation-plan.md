@@ -165,6 +165,8 @@ The backup is configuration recovery, not a live disk image. Imaging a mounted e
 
 ## Phase 3 — build natively on the Pi
 
+**Passed on 2026-09-04 UTC.** A clean build in a new Pi directory passed native lint, 29 tests, ELF/linkage inspection, and package-content checks. The dependency audit led to explicit runtime-library minimums in the package. [Evidence](validation/2026-09-04-phases-3-4.md).
+
 Synchronize the repository into a new user-owned directory on the Pi. Exclude `.git`, `target`, `.build`, `dist`, private keys, and local test evidence.
 
 Install only the dependencies confirmed missing by Phase 2. The expected list includes Rust/Cargo 1.85 or newer, Clang, pkg-config, CMake, and `libpam0g-dev`; inspect package candidates before installing them.
@@ -181,6 +183,8 @@ On the Pi:
 Do not copy a macOS-built binary to the Pi or treat a cross-check as a native ABI test.
 
 ## Phase 4 — stage the package without touching sudo behavior
+
+**Passed on 2026-09-04 UTC.** The freshly built package was installed without changing sudo/PAM contents, permissions, provider binaries, or alternatives. Fresh passwordless sudo was denied, and the normal Ubuntu-password path succeeded. Syn remains disabled and unpaired. [Evidence](validation/2026-09-04-phases-3-4.md).
 
 Install the Debian package. Its post-install action must only create the locked `syn` account, directories, binaries, PAM file, and service definition.
 
