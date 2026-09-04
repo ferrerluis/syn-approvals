@@ -12,6 +12,17 @@ import Testing
     #expect(TargetConnection.missingMetadataError(data: Data([0xff]), isComplete: true) is TransportError)
 }
 
+@Test func tlsVerificationCallbackIsConstructedOutsideMainActor() {
+    // This synchronous nonisolated call is a compile-time regression guard:
+    // removing `nonisolated` from the factory makes the test fail to compile.
+    let callback = TargetConnection.makeTrustVerificationBlock(
+        hostname: "test.example",
+        pin: String(repeating: "0", count: 64),
+        handshake: HandshakeProgress()
+    )
+    withExtendedLifetime(callback) {}
+}
+
 @Test @MainActor func interruptedTLSAuthorizationPausesButNetworkFailureDoesNot() throws {
     let target = TargetRecord(
         targetID: "test", displayName: "test", webSocketURL: try #require(URL(string: "wss://test.example:41781")),

@@ -70,12 +70,16 @@ final class TargetConnection {
         let pin = target.serverCertificateSHA256Hex
         let handshake = HandshakeProgress()
         self.handshake = handshake
-        sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { @Sendable _, trust, complete in
-            let trustRef = sec_trust_copy_ref(trust).takeRetainedValue()
-            let accepted = Self.verifyTrust(trustRef, hostname: hostname, pin: pin)
-            handshake.recordTrust(accepted)
-            complete(accepted)
-        }, DispatchQueue(label: "org.syn-approvals.tls-verification"))
+        let verifyBlock = Self.makeTrustVerificationBlock(
+            hostname: hostname,
+            pin: pin,
+            handshake: handshake
+        )
+        sec_protocol_options_set_verify_block(
+            tls.securityProtocolOptions,
+            verifyBlock,
+            DispatchQueue(label: "org.syn-approvals.tls-verification")
+        )
 
         let parameters = NWParameters(tls: tls)
         let websocket = NWProtocolWebSocket.Options()
@@ -108,6 +112,22 @@ final class TargetConnection {
             self.fail(URLError(.timedOut))
         }
         connection.start(queue: .main)
+    }
+
+    nonisolated static func makeTrustVerificationBlock(
+        hostname: String,
+        pin: String,
+        handshake: HandshakeProgress
+    ) -> sec_protocol_verify_t {
+        // This callback is invoked on a Network.framework dispatch queue. Build
+        // it in a nonisolated context so it cannot inherit TargetConnection's
+        // MainActor executor and trap before certificate verification begins.
+        { @Sendable _, trust, complete in
+            let trustRef = sec_trust_copy_ref(trust).takeRetainedValue()
+            let accepted = Self.verifyTrust(trustRef, hostname: hostname, pin: pin)
+            handshake.recordTrust(accepted)
+            complete(accepted)
+        }
     }
 
     func stop() {
