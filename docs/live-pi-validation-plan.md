@@ -243,10 +243,12 @@ Restore the original sudo configuration after the shadow tests. Fix any crash, h
 
 ## Phase 7 — arm Syn with automatic rollback active
 
+**Passed on 2026-09-04 UTC.** Guarded normal installation and all six immediate checks passed. Ordinary sudo approved a harmless command without the Ubuntu password; both alternate provider paths refused elevation. Actual Pi-local normal recovery restored the baseline and fresh password sudo, followed by successful reinstallation and a new approved, healthy diagnostic through ordinary sudo. At handoff Syn is armed with rollback deadline **2026-09-04 15:41:11 UTC (11:41:11 a.m. Eastern)**; recheck live state before Phase 8. The timer remains active, and permanent deployment is not yet validated. [Evidence](validation/2026-09-04-phase-7.md).
+
 Prerequisites:
 
 - Signed `/usr/bin/true` round trip completed within the previous 30 minutes.
-- `synctl doctor` has no blocker.
+- Root-run `synctl doctor` passes configuration, identity, socket, overlay, and classic-sudo checks. Before installation, missing armed state and the still-setuid alternate provider are expected; full armed health must pass immediately after apply.
 - Root recovery session is open.
 - Durable rollback timer is active and its deadline is visible.
 - Current backups and provider modes match the captured baseline.

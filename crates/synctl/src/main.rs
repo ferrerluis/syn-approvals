@@ -282,6 +282,7 @@ struct DoctorReport {
     overlay: Check,
     sudo_ws: Check,
     sudo_rs_provider: Check,
+    sudo_coupling: Check,
     install_state: Check,
     recovery_timer: Check,
     healthy: bool,
@@ -475,7 +476,6 @@ fn run(cli: &Cli) -> Result<()> {
                 require_root()?;
                 if arguments.state.exists() {
                     installer::recover(&arguments.state, true)?;
-                    fs::remove_file(&arguments.state)?;
                 } else if Path::new("/etc/sudoers.d/90-syn-managed-user").exists() {
                     bail!("Syn appears armed but install state is missing; use console recovery");
                 }
@@ -545,6 +545,17 @@ fn doctor(paths: &ConfigPaths) -> Result<DoctorReport> {
     let overlay = overlay_check(&agent);
     let sudo_ws = command_check("sudo.ws", &["-V"]);
     let sudo_rs_provider = sudo_rs_check();
+    let sudo_coupling = match installer::check_installed_coupling(Path::new(DEFAULT_INSTALL_STATE))
+    {
+        Ok(detail) => Check {
+            status: "ok",
+            detail,
+        },
+        Err(error) => Check {
+            status: "not_armed_or_invalid",
+            detail: error.to_string(),
+        },
+    };
     let install_state = path_check(Path::new(DEFAULT_INSTALL_STATE));
     let recovery = recovery_timer::status();
     let recovery_timer = Check {
@@ -570,6 +581,7 @@ fn doctor(paths: &ConfigPaths) -> Result<DoctorReport> {
         && overlay.status == "ok"
         && sudo_ws.status == "ok"
         && sudo_rs_provider.status == "ok"
+        && sudo_coupling.status == "ok"
         && install_state.status == "ok";
 
     Ok(DoctorReport {
@@ -585,6 +597,7 @@ fn doctor(paths: &ConfigPaths) -> Result<DoctorReport> {
         overlay,
         sudo_ws,
         sudo_rs_provider,
+        sudo_coupling,
         install_state,
         recovery_timer,
         healthy,
@@ -638,6 +651,7 @@ fn coupling_check(
             detail: "configuration must be valid before coupling can be checked".into(),
         };
     };
+    let mut fingerprints = None;
     let keys_match = (|| -> Option<bool> {
         let target_public =
             verifying_key_from_pem(&fs::read_to_string(&agent.target_public_key).ok()?).ok()?;
@@ -652,6 +666,12 @@ fn coupling_check(
             verifying_key_from_pem(&fs::read_to_string(&agent.denial_public_key).ok()?).ok()?;
         let plugin_denial =
             verifying_key_from_pem(&fs::read_to_string(&plugin.denial_public_key).ok()?).ok()?;
+        fingerprints = Some(format!(
+            "target={} approval={} denial={}",
+            key_id_hex(&target_public),
+            key_id_hex(&agent_approval),
+            key_id_hex(&agent_denial)
+        ));
         Some(
             syn_protocol::key_id(&target_public)
                 == syn_protocol::key_id(target_private.verifying_key())
@@ -667,7 +687,10 @@ fn coupling_check(
     Check {
         status: if matches { "ok" } else { "invalid" },
         detail: if matches {
-            "target, managed identity, timeout, and authorization keys match".into()
+            format!(
+                "target, managed identity, timeout, and authorization keys match; {}",
+                fingerprints.unwrap_or_default()
+            )
         } else {
             "agent, plug-in, policy, or key material differs or is unreadable".into()
         },

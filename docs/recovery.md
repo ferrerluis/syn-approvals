@@ -35,14 +35,14 @@ From an existing root shell or Ubuntu recovery root shell:
 Recovery performs this order:
 
 1. remove the managed `NOPASSWD` rule;
-2. disarm the automatic recovery timer;
-3. restore the pre-Syn `sudo.conf` backup, removing the plug-in registration;
-4. restore the pre-install `update-alternatives` selection;
-5. remove only Syn-recorded stat overrides and restore provider modes/ownership;
-6. stop and disable `syn-agent`;
-7. validate the complete sudoers configuration.
+2. restore the pre-Syn `sudo.conf` backup, removing the plug-in registration;
+3. restore the pre-install `update-alternatives` selection;
+4. remove only unchanged Syn-recorded stat overrides and restore provider ownership before modes (changing ownership can clear setuid);
+5. stop and disable `syn-agent`;
+6. validate the complete sudoers configuration and archive recovered installation state beside its preserved backup;
+7. disarm the automatic recovery timer last.
 
-It never deletes keys or state automatically. After ordinary password sudo is verified, remove `/etc/syn` and `/var/lib/syn` manually if permanent key deletion is intended.
+It never deletes keys or recovery evidence automatically. Archiving the completed state lets a later guarded installation start clean without overwriting its backup. After ordinary password sudo is verified, remove `/etc/syn` and `/var/lib/syn` manually if permanent key deletion is intended.
 
 ## Interrupted installation
 

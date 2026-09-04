@@ -15,7 +15,6 @@ const SUDOERS_RULE: &str = "/etc/sudoers.d/90-syn-managed-user";
 const PLUGIN_PATH: &str = "/usr/libexec/sudo/syn_approval.so";
 const PAIRING_MARKER: &str = "/var/lib/syn/pairing-complete.json";
 const PREFLIGHT_MARKER: &str = "/var/lib/syn/preflight-complete.json";
-const BACKUP_PATH: &str = "/var/lib/syn/backups/sudo.conf.before-syn";
 const PLUGIN_LINE: &str =
     "Plugin syn_approval /usr/libexec/sudo/syn_approval.so config=/etc/syn/plugin.toml";
 
@@ -193,15 +192,13 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
     let previous_alternative = fs::read_link("/etc/alternatives/sudo")
         .ok()
         .map(|path| path.display().to_string());
-    let backup = PathBuf::from(BACKUP_PATH);
-    if backup.exists() {
-        bail!("refusing to overwrite sudo.conf recovery backup");
-    }
-    if let Some(parent) = backup.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(SUDO_CONF, &backup)?;
-    fs::set_permissions(&backup, fs::Permissions::from_mode(0o600))?;
+    validate_root_file(Path::new(SUDO_CONF))?;
+    validate_root_file(Path::new(PLUGIN_PATH))?;
+    let backup = PathBuf::from(format!(
+        "/var/lib/syn/backups/sudo.conf.install.{}.{}",
+        syn_protocol::unix_time_ms(),
+        std::process::id()
+    ));
 
     let providers = command_stdout("update-alternatives", &["--list", "sudo"])?;
     let mut stat_overrides = Vec::new();
@@ -236,6 +233,9 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
         });
     }
 
+    // Retain each backup independently so recovery does not prevent a later
+    // guarded reinstall, and never truncate a previous recovery copy.
+    write_new_backup(&backup, &fs::read(SUDO_CONF)?)?;
     let mut state = InstallState {
         schema_version: 1,
         phase: "prepared".into(),
@@ -253,16 +253,8 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
 
     let result = (|| -> Result<()> {
         for record in &stat_overrides {
-            run(
-                "dpkg-statoverride",
-                &[
-                    "--add",
-                    "root",
-                    "root",
-                    "0755",
-                    record.path.to_string_lossy().as_ref(),
-                ],
-            )?;
+            let path = record.path.to_string_lossy();
+            run("dpkg-statoverride", &disable_provider_arguments(&path))?;
             if fs::metadata(&record.path)?.mode() & 0o4000 != 0 {
                 bail!(
                     "setuid override did not take effect for {}",
@@ -300,10 +292,7 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
 
         run("systemctl", &["enable", "--now", "syn-agent.service"])?;
         run("systemctl", &["is-active", "--quiet", "syn-agent.service"])?;
-        let rule = format!(
-            "# Managed by Syn. Remove this before disabling syn_approval.\n{} ALL=(ALL:ALL) NOPASSWD: ALL\n",
-            plan.managed_user
-        );
+        let rule = managed_rule(&plan.managed_user);
         let temporary_rule = Path::new("/etc/sudoers.d/.90-syn-managed-user.tmp");
         atomic_write(temporary_rule, rule.as_bytes(), 0o440)?;
         run(
@@ -372,29 +361,28 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
     }
     for record in &state.stat_overrides {
         let path = record.path.to_string_lossy();
-        let _ = Command::new("dpkg-statoverride")
-            .args(["--remove", path.as_ref()])
-            .status();
-        fs::set_permissions(
-            &record.path,
-            fs::Permissions::from_mode(record.previous_mode),
-        )?;
-        let c_path = std::ffi::CString::new(record.path.as_os_str().as_encoded_bytes())?;
-        if unsafe {
-            libc::chown(
-                c_path.as_ptr(),
-                record.previous_owner,
-                record.previous_group,
-            )
-        } != 0
-        {
-            bail!("unable to restore ownership for {}", record.path.display());
+        let existing = Command::new("dpkg-statoverride")
+            .args(["--list", path.as_ref()])
+            .output()?;
+        if existing.status.success() {
+            validate_syn_override(&String::from_utf8(existing.stdout)?, &path)?;
+            run("dpkg-statoverride", &["--remove", &path])?;
+        } else if existing.status.code() != Some(1) || !existing.stdout.is_empty() {
+            bail!("unable to inspect stat override for {path}");
         }
+        // chown can clear setuid even when the owner is unchanged. Restore
+        // ownership first, then mode, through one non-symlink file descriptor.
+        restore_provider_metadata(record)?;
     }
-    let _ = Command::new("systemctl")
-        .args(["disable", "--now", "syn-agent.service"])
-        .status();
+    run("systemctl", &["disable", "--now", "syn-agent.service"])?;
     run("/usr/sbin/visudo.ws", &["-cf", "/etc/sudoers"])?;
+    archive_recovered_state(
+        state_path,
+        state
+            .sudo_conf_backup
+            .as_deref()
+            .context("recovery backup is missing")?,
+    )?;
     recovery_timer::disarm_after_recovery()?;
     actions.push("ordinary password sudo restored; keys retained".into());
     Ok(RecoveryResult {
@@ -406,6 +394,62 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
 fn sudo_alternative_auto() -> Result<bool> {
     let query = command_stdout("update-alternatives", &["--query", "sudo"])?;
     parse_alternative_auto(&query)
+}
+
+pub fn check_installed_coupling(state_path: &Path) -> Result<String> {
+    validate_root_file(state_path)?;
+    let state: InstallState = serde_json::from_slice(&fs::read(state_path)?)?;
+    if state.schema_version != 1 || state.shadow_mode || state.phase != "armed" {
+        bail!("installation is not in the armed phase");
+    }
+    if lookup_uid(&state.managed_user) != Some(state.managed_uid) {
+        bail!("managed account no longer matches the installed UID");
+    }
+    if fs::canonicalize("/usr/bin/sudo")? != fs::canonicalize("/usr/bin/sudo.ws")? {
+        bail!("ordinary sudo does not select sudo.ws");
+    }
+    for path in [SUDO_CONF, SUDOERS_RULE, PLUGIN_PATH] {
+        validate_root_file(Path::new(path))?;
+    }
+    validate_coupling_contents(
+        &fs::read_to_string(SUDO_CONF)?,
+        &fs::read_to_string(SUDOERS_RULE)?,
+        &state.managed_user,
+    )?;
+    for record in &state.stat_overrides {
+        let path = record.path.to_string_lossy();
+        validate_syn_override(
+            &command_stdout("dpkg-statoverride", &["--list", &path])?,
+            &path,
+        )?;
+        if fs::metadata(&record.path)?.mode() & 0o4000 != 0 {
+            bail!("recorded alternate provider is still setuid");
+        }
+    }
+    run("systemctl", &["is-active", "--quiet", "syn-agent.service"])?;
+    Ok(format!("armed for {} ({}); sudo.ws, global plug-in, exact one-user rule, persistent provider overrides, and active relay verified", state.managed_user, state.managed_uid))
+}
+
+fn managed_rule(user: &str) -> String {
+    format!("# Managed by Syn. Remove this before disabling syn_approval.\n{user} ALL=(ALL:ALL) NOPASSWD: ALL\n")
+}
+
+fn validate_coupling_contents(sudo_conf: &str, rule: &str, user: &str) -> Result<()> {
+    validate_user(user)?;
+    let registrations: Vec<_> = sudo_conf
+        .lines()
+        .filter(|line| {
+            let mut words = line.split_whitespace();
+            words.next() == Some("Plugin") && words.next() == Some("syn_approval")
+        })
+        .collect();
+    if registrations.len() != 1 || registrations[0].trim() != PLUGIN_LINE {
+        bail!("expected exactly one global Syn plug-in registration");
+    }
+    if rule != managed_rule(user) {
+        bail!("managed sudoers rule differs from the exact one-user rule");
+    }
+    Ok(())
 }
 
 fn parse_alternative_auto(query: &str) -> Result<bool> {
@@ -427,6 +471,79 @@ fn validate_root_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn disable_provider_arguments(path: &str) -> [&str; 6] {
+    ["--update", "--add", "root", "root", "0755", path]
+}
+
+fn validate_syn_override(output: &str, path: &str) -> Result<()> {
+    let fields: Vec<_> = output.split_whitespace().collect();
+    if fields.len() != 4
+        || fields[0] != "root"
+        || fields[1] != "root"
+        || u32::from_str_radix(fields[2], 8).ok() != Some(0o755)
+        || fields[3] != path
+    {
+        bail!("stat override no longer matches Syn's recorded change: {path}");
+    }
+    Ok(())
+}
+
+fn restore_provider_metadata(record: &StatOverrideRecord) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&record.path)?;
+    if !file.metadata()?.is_file() {
+        bail!("provider is not a regular file: {}", record.path.display());
+    }
+    if unsafe {
+        libc::fchown(
+            file.as_raw_fd(),
+            record.previous_owner,
+            record.previous_group,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error()).context("restore provider ownership");
+    }
+    file.set_permissions(fs::Permissions::from_mode(record.previous_mode))?;
+    let metadata = file.metadata()?;
+    if metadata.uid() != record.previous_owner
+        || metadata.gid() != record.previous_group
+        || metadata.mode() & 0o7777 != record.previous_mode
+    {
+        bail!("provider metadata restoration did not match recorded state");
+    }
+    Ok(())
+}
+
+fn write_new_backup(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    fs::File::open(path.parent().context("backup parent is missing")?)?.sync_all()?;
+    Ok(())
+}
+
+fn archive_recovered_state(state_path: &Path, backup: &Path) -> Result<()> {
+    let archived = PathBuf::from(format!("{}.recovered-state.json", backup.display()));
+    if archived.exists() {
+        bail!("recovery archive already exists");
+    }
+    fs::rename(state_path, &archived)?;
+    fs::File::open(archived.parent().context("archive parent is missing")?)?.sync_all()?;
+    fs::File::open(state_path.parent().context("state parent is missing")?)?.sync_all()?;
+    Ok(())
+}
+
 fn apply_shadow(plan: &InstallPlan, state_path: &Path, managed_uid: u32) -> Result<()> {
     validate_root_file(Path::new(SUDO_CONF))?;
     validate_root_file(Path::new(PLUGIN_PATH))?;
@@ -437,16 +554,7 @@ fn apply_shadow(plan: &InstallPlan, state_path: &Path, managed_uid: u32) -> Resu
         syn_protocol::unix_time_ms()
     ));
     // create_new refuses collisions and symlinks; retain this backup after recovery.
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&backup)?;
-    file.write_all(&original)?;
-    file.sync_all()?;
-    fs::File::open(backup.parent().context("shadow backup parent is missing")?)?.sync_all()?;
+    write_new_backup(&backup, &original)?;
     let mut state = InstallState {
         schema_version: 1,
         phase: "shadow_prepared".into(),
@@ -526,18 +634,7 @@ fn recover_shadow(state_path: &Path, state: &InstallState, apply: bool) -> Resul
     }
     run("/usr/sbin/visudo.ws", &["-cf", "/etc/sudoers"])?;
     // Archive rather than overwrite: the next shadow/install run starts clean.
-    let archived = PathBuf::from(format!("{}.recovered-state.json", backup.display()));
-    if archived.exists() {
-        bail!("shadow recovery archive already exists");
-    }
-    fs::rename(state_path, &archived)?;
-    fs::File::open(
-        archived
-            .parent()
-            .context("shadow archive parent is missing")?,
-    )?
-    .sync_all()?;
-    fs::File::open(state_path.parent().context("state parent is missing")?)?.sync_all()?;
+    archive_recovered_state(state_path, backup)?;
     recovery_timer::disarm_after_recovery()?;
     Ok(RecoveryResult {
         applied: true,
@@ -599,6 +696,122 @@ fn run(program: &str, arguments: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(name: &str) -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "syn-installer-{name}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn override_updates_live_permissions_and_only_our_override_can_be_removed() {
+        let path = "/usr/lib/cargo/bin/sudo";
+        assert_eq!(
+            disable_provider_arguments(path),
+            ["--update", "--add", "root", "root", "0755", path]
+        );
+        assert!(validate_syn_override(&format!("root root 755 {path}\n"), path).is_ok());
+        assert!(validate_syn_override(&format!("root root 0755 {path}\n"), path).is_ok());
+        for invalid in [
+            format!("root root 4755 {path}"),
+            format!("someone root 755 {path}"),
+            "root root 755 /another/path".into(),
+            format!("root root 755 {path}\nroot root 755 {path}"),
+            String::new(),
+        ] {
+            assert!(validate_syn_override(&invalid, path).is_err());
+        }
+    }
+
+    #[test]
+    fn installed_coupling_rejects_missing_duplicate_or_modified_rules() {
+        let user = "managed";
+        let rule = managed_rule(user);
+        assert!(validate_coupling_contents(PLUGIN_LINE, &rule, user).is_ok());
+        for conf in [
+            String::new(),
+            format!("# {PLUGIN_LINE}"),
+            format!("{PLUGIN_LINE}\n{PLUGIN_LINE}"),
+            PLUGIN_LINE.replace("config=", "other="),
+        ] {
+            assert!(validate_coupling_contents(&conf, &rule, user).is_err());
+        }
+        for invalid in [
+            String::new(),
+            managed_rule("someone_else"),
+            format!("{rule}ALL ALL=(ALL) NOPASSWD: ALL\n"),
+        ] {
+            assert!(validate_coupling_contents(PLUGIN_LINE, &invalid, user).is_err());
+        }
+    }
+
+    #[test]
+    fn recovery_restores_setuid_after_ownership_and_rejects_symlinks() {
+        let directory = TestDirectory::new("metadata");
+        let path = directory.0.join("inert-provider-fixture");
+        fs::write(&path, b"inert test fixture, never executed").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let record = StatOverrideRecord {
+            path: path.clone(),
+            previous_mode: 0o4755,
+            previous_owner: metadata.uid(),
+            previous_group: metadata.gid(),
+        };
+        restore_provider_metadata(&record).unwrap();
+        let restored = fs::metadata(&path).unwrap();
+        assert_eq!(restored.uid(), record.previous_owner);
+        assert_eq!(restored.gid(), record.previous_group);
+        assert_eq!(restored.mode() & 0o7777, 0o4755);
+
+        let link = directory.0.join("provider-link");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        assert!(restore_provider_metadata(&StatOverrideRecord {
+            path: link,
+            ..record
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn backups_and_recovery_archives_are_preserved_across_reinstallation() {
+        let directory = TestDirectory::new("archive");
+        let state = directory.0.join("install-state.json");
+        for iteration in 0..2 {
+            let backup = directory.0.join(format!("sudo.conf.{iteration}"));
+            write_new_backup(&backup, b"original sudo configuration").unwrap();
+            assert!(write_new_backup(&backup, b"replacement").is_err());
+            assert_eq!(fs::read(&backup).unwrap(), b"original sudo configuration");
+            assert_eq!(fs::metadata(&backup).unwrap().mode() & 0o7777, 0o600);
+            fs::write(&state, b"recorded recovery state").unwrap();
+            archive_recovered_state(&state, &backup).unwrap();
+            assert!(!state.exists());
+            assert_eq!(
+                fs::read(format!("{}.recovered-state.json", backup.display())).unwrap(),
+                b"recorded recovery state"
+            );
+            fs::write(&state, b"new state must survive archive collision").unwrap();
+            assert!(archive_recovered_state(&state, &backup).is_err());
+            assert!(state.exists());
+        }
+    }
 
     #[test]
     fn shadow_plan_never_changes_providers_or_adds_passwordless_access() {
