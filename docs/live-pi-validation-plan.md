@@ -202,6 +202,8 @@ If package staging changes sudo behavior, remove the staged package and fix the 
 
 ## Phase 5 — prove transport and approval without sudo
 
+**In progress on 2026-09-04 UTC; not passed.** The pinned connection and root-signed synthetic request reached the Mac review UI. Live Deny timed out behind a Keychain permission dialog; signing/UI fixes now pass 16 Swift tests, but actual Mac approval/denial still need proof. macOS Keychain permission requires user interaction that Computer Use cannot perform. No shadow sudo change has been applied. [Progress, fixes, and remaining gates](validation/2026-09-04-phases-5-6-progress.md).
+
 Generate the target identity on the Pi and the approver identities in Syn.app. Transfer only public keys and the certificate-pinned profile through SSH.
 
 Configure the agent for Nord Meshnet using the exact Pi address `100.99.102.171` and the Mac peer `100.70.150.245`. Confirm port `41781` is reachable only through the intended overlay path and that mutual TLS rejects an unpaired client.
@@ -222,6 +224,8 @@ No command is executed in this phase. A late, modified, wrong-target, or replaye
 ## Phase 6 — load the plug-in without adding `NOPASSWD`
 
 This shadow phase tests the real sudo ABI while ordinary password authentication remains in force.
+
+The guarded command is `synctl --json install --user ferrerluis --shadow` (preview), followed by `--apply --acknowledge-console-recovery` only after Phase 5 passes. It writes recovery state before touching sudo.conf and leaves the provider alternative unchanged. The timer uses the same recovery command for shadow and normal installation; shadow recovery archives its state so later runs start clean. This new path is not yet live-validated.
 
 1. Re-arm the recovery timer.
 2. Select or invoke `sudo.ws` while preserving the original alternative in the install state.

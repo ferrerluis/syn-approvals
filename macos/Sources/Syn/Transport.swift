@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Network
 import Security
 
 enum TransportError: Error, LocalizedError {
@@ -16,130 +17,165 @@ enum TransportError: Error, LocalizedError {
     }
 }
 
-final class TargetConnection: @unchecked Sendable {
+// Network.framework permits per-connection trust without weakening ATS globally
+// or installing a target certificate in the system trust store.
+@MainActor
+final class TargetConnection {
     let target: TargetRecord
     private let onMessage: @Sendable (Result<WireMessage, Error>) -> Void
-    private let delegate: PinnedSessionDelegate
-    private var session: URLSession?
-    private var task: URLSessionWebSocketTask?
+    private var connection: NWConnection?
+    private var connectionDeadline: Task<Void, Never>?
 
     init(target: TargetRecord, onMessage: @escaping @Sendable (Result<WireMessage, Error>) -> Void) {
         self.target = target
         self.onMessage = onMessage
-        self.delegate = PinnedSessionDelegate(target: target)
     }
 
     func start() {
-        guard task == nil else { return }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.waitsForConnectivity = true
-        configuration.timeoutIntervalForRequest = 20
-        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-        let task = session.webSocketTask(with: target.webSocketURL)
-        self.session = session
-        self.task = task
-        task.resume()
-        receiveNext()
+        guard connection == nil else { return }
+        guard target.webSocketURL.scheme == "wss", let hostname = target.webSocketURL.host,
+              let identity = Self.identity(label: target.clientIdentityLabel),
+              let localIdentity = sec_identity_create(identity) else {
+            onMessage(.failure(TransportError.missingClientIdentity(target.clientIdentityLabel)))
+            return
+        }
+        let tls = NWProtocolTLS.Options()
+        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+        sec_protocol_options_set_max_tls_protocol_version(tls.securityProtocolOptions, .TLSv13)
+        sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, hostname)
+        sec_protocol_options_set_local_identity(tls.securityProtocolOptions, localIdentity)
+        let pin = target.serverCertificateSHA256Hex
+        sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { @Sendable _, trust, complete in
+            let trustRef = sec_trust_copy_ref(trust).takeRetainedValue()
+            complete(Self.verifyTrust(trustRef, hostname: hostname, pin: pin))
+        }, DispatchQueue(label: "org.syn-approvals.tls-verification"))
+
+        let parameters = NWParameters(tls: tls)
+        let websocket = NWProtocolWebSocket.Options()
+        websocket.autoReplyPing = true
+        websocket.maximumMessageSize = 64 * 1024
+        parameters.defaultProtocolStack.applicationProtocols.insert(websocket, at: 0)
+        let connection = NWConnection(to: .url(target.webSocketURL), using: parameters)
+        self.connection = connection
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            Task { @MainActor in
+                guard let self, let connection, self.connection === connection else { return }
+                switch state {
+                case .ready:
+                    self.connectionDeadline?.cancel()
+                    self.connectionDeadline = nil
+                    self.receiveNext(connection)
+                case let .failed(error), let .waiting(error):
+                    self.fail(error)
+                case .cancelled:
+                    self.fail(URLError(.networkConnectionLost))
+                default: break
+                }
+            }
+        }
+        connectionDeadline = Task { [weak self, weak connection] in
+            do { try await Task.sleep(for: .seconds(20)) }
+            catch { return }
+            guard let self, let connection, self.connection === connection else { return }
+            self.fail(URLError(.timedOut))
+        }
+        connection.start(queue: .main)
     }
 
     func stop() {
-        task?.cancel(with: .goingAway, reason: nil)
-        session?.invalidateAndCancel()
-        task = nil
-        session = nil
+        connectionDeadline?.cancel()
+        connectionDeadline = nil
+        let previous = connection
+        connection = nil
+        previous?.stateUpdateHandler = nil
+        previous?.cancel()
     }
 
     func send(_ wire: WireMessage) async throws {
-        guard let task else { throw URLError(.notConnectedToInternet) }
-        try await task.send(.data(try wire.encoded()))
+        guard let connection else { throw URLError(.notConnectedToInternet) }
+        let data = try wire.encoded()
+        let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
+        let context = NWConnection.ContentContext(identifier: "syn-binary", metadata: [metadata])
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            })
+        }
     }
 
-    private func receiveNext() {
-        guard let task else { return }
-        task.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case let .success(.data(data)):
-                do {
-                    self.onMessage(.success(try WireMessage(data: data)))
-                    self.receiveNext()
-                } catch {
-                    self.onMessage(.failure(error))
-                    self.stop()
+    private func receiveNext(_ connection: NWConnection) {
+        connection.receiveMessage { [weak self, weak connection] data, context, _, error in
+            Task { @MainActor in
+                guard let self, let connection, self.connection === connection else { return }
+                if let error { self.fail(error); return }
+                guard let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata else {
+                    self.fail(TransportError.unexpectedMessage)
+                    return
                 }
-            case .success(.string):
-                self.onMessage(.failure(TransportError.unexpectedMessage))
-                self.stop()
-            case let .failure(error):
-                self.onMessage(.failure(error))
-                self.stop()
-            @unknown default:
-                self.onMessage(.failure(TransportError.unexpectedMessage))
-                self.stop()
+                switch metadata.opcode {
+                case .binary:
+                    do {
+                        guard let data, data.count <= 64 * 1024 else { throw TransportError.unexpectedMessage }
+                        self.onMessage(.success(try WireMessage(data: data)))
+                    } catch { self.fail(error); return }
+                case .ping, .pong: break
+                case .close: self.fail(URLError(.networkConnectionLost)); return
+                default: self.fail(TransportError.unexpectedMessage); return
+                }
+                self.receiveNext(connection)
             }
         }
     }
-}
 
-private final class PinnedSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    let target: TargetRecord
+    private func fail(_ error: Error) {
+        stop()
+        onMessage(.failure(error))
+    }
 
-    init(target: TargetRecord) { self.target = target }
-
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        switch challenge.protectionSpace.authenticationMethod {
-        case NSURLAuthenticationMethodServerTrust:
-            guard let trust = challenge.protectionSpace.serverTrust,
-                  let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
-                  let certificate = chain.first else {
-                completionHandler(.cancelAuthenticationChallenge, nil)
-                return
-            }
-            let digest = Data(SHA256.hash(data: SecCertificateCopyData(certificate) as Data)).hex
-            guard constantTimeEqual(digest.lowercased(), target.serverCertificateSHA256Hex.lowercased()) else {
-                completionHandler(.cancelAuthenticationChallenge, nil)
-                return
-            }
-            completionHandler(.useCredential, URLCredential(trust: trust))
-
-        case NSURLAuthenticationMethodClientCertificate:
-            guard let identity = Self.identity(label: target.clientIdentityLabel) else {
-                completionHandler(.cancelAuthenticationChallenge, nil)
-                return
-            }
-            var certificate: SecCertificate?
-            guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess,
-                  let certificate else {
-                completionHandler(.cancelAuthenticationChallenge, nil)
-                return
-            }
-            completionHandler(
-                .useCredential,
-                URLCredential(identity: identity, certificates: [certificate], persistence: .forSession)
-            )
-
-        default:
-            completionHandler(.performDefaultHandling, nil)
-        }
+    nonisolated static func verifyTrust(_ trust: SecTrust, hostname: String, pin: String) -> Bool {
+        // Fresh SecTrust objects have no evaluated chain yet. This first pass
+        // only builds it; its result is never an authorization decision.
+        guard SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess else { return false }
+        _ = SecTrustEvaluateWithError(trust, nil)
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let certificate = chain.first else { return false }
+        let digest = Data(SHA256.hash(data: SecCertificateCopyData(certificate) as Data)).hex
+        guard constantTimeEqual(digest, pin.lowercased()) else { return false }
+        return SecTrustSetAnchorCertificates(trust, [certificate] as CFArray) == errSecSuccess
+            && SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess
+            && SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess
+            && SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, hostname as CFString)) == errSecSuccess
+            && SecTrustEvaluateWithError(trust, nil)
     }
 
     private static func identity(label: String) -> SecIdentity? {
+        // Identity queries do not reliably honor kSecAttrLabel on macOS.
+        // Resolve the labeled certificate first, then its exact matching key.
         let query: [CFString: Any] = [
-            kSecClass: kSecClassIdentity,
+            kSecClass: kSecClassCertificate,
             kSecAttrLabel: label,
             kSecMatchLimit: kSecMatchLimitOne,
             kSecReturnRef: true,
         ]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return (result as! SecIdentity)
+        guard let result, CFGetTypeID(result) == SecCertificateGetTypeID() else { return nil }
+        let certificate = result as! SecCertificate
+        var commonName: CFString?
+        guard SecCertificateCopyCommonName(certificate, &commonName) == errSecSuccess,
+              commonName as String? == label else { return nil }
+        var identity: SecIdentity?
+        guard SecIdentityCreateWithCertificate(nil, certificate, &identity) == errSecSuccess,
+              let identity else { return nil }
+        var identityCertificate: SecCertificate?
+        guard SecIdentityCopyCertificate(identity, &identityCertificate) == errSecSuccess,
+              let identityCertificate,
+              SecCertificateCopyData(identityCertificate) as Data == SecCertificateCopyData(certificate) as Data else { return nil }
+        return identity
     }
 
-    private func constantTimeEqual(_ left: String, _ right: String) -> Bool {
+    nonisolated private static func constantTimeEqual(_ left: String, _ right: String) -> Bool {
         let a = Array(left.utf8)
         let b = Array(right.utf8)
         guard a.count == b.count else { return false }

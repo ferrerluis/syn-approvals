@@ -15,21 +15,30 @@ enum KeyStoreError: Error, LocalizedError {
     }
 }
 
-struct SynKeyStore: Sendable {
+protocol DecisionSigning: Sendable {
+    func approvalPublicKey() throws -> Data
+    func denialPublicKey() throws -> Data
+    func signApproval(payload: Data, reason: String) throws -> (keyID: Data, signature: Data)
+    func signDenial(payload: Data) throws -> (keyID: Data, signature: Data)
+}
+
+struct SynKeyStore: DecisionSigning {
     private let service = "org.syn-approvals.Syn"
     private let approvalAccount = "approval-key-v1"
     private let denialAccount = "denial-key-v1"
 
     func publicIdentities() throws -> (approval: Data, denial: Data) {
-        let approval = try approvalKey(context: nil).publicKey.x963Representation
-        let denial = try denialKey().publicKey.x963Representation
-        return (approval, denial)
+        (try approvalPublicKey(), try denialPublicKey())
     }
+
+    func approvalPublicKey() throws -> Data { try approvalKey(context: nil).publicKey.x963Representation }
+    func denialPublicKey() throws -> Data { try denialKey().publicKey.x963Representation }
 
     func signApproval(payload: Data, reason: String) throws -> (keyID: Data, signature: Data) {
         let context = LAContext()
         context.localizedReason = reason
         context.touchIDAuthenticationAllowableReuseDuration = 0
+        defer { context.invalidate() }
         let key = try approvalKey(context: context)
         let signature = try key.signature(for: payload)
         return (Data(SHA256.hash(data: key.publicKey.x963Representation)), signature.rawRepresentation)

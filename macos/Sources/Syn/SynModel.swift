@@ -9,19 +9,32 @@ final class SynModel: ObservableObject {
     @Published private(set) var targets: [TargetRecord] = []
     @Published private(set) var pending: [VerifiedApprovalRequest] = []
     @Published private(set) var connectedTargets: Set<String> = []
+    @Published private(set) var authenticatingRequests: Set<String> = []
     @Published var selectedRequestID: String?
     @Published var lastError: String?
     @Published var pairingProfileText = ""
     @Published private(set) var approverIdentityText = "Generate the Mac identities before pairing."
+    var openMainWindow: (() -> Void)?
 
     private let store: TargetStore?
     private let keyStore = SynKeyStore()
+    private let signer: any DecisionSigning
+    private let servicesEnabled: Bool
+    private let decisionSender: (@MainActor (WireMessage, String) async throws -> Void)?
     private let notifications = SynNotificationCenter()
     private var connections: [String: TargetConnection] = [:]
-    private var seenRequestHashes: [String: Data] = [:]
+    private var seenRequests: [String: (hash: Data, expiresAt: Date)] = [:]
     private var reconnectAttempts: [String: Int] = [:]
 
-    init() {
+    init(
+        startServices: Bool = true,
+        signer: any DecisionSigning = SynKeyStore(),
+        decisionSender: (@MainActor (WireMessage, String) async throws -> Void)? = nil
+    ) {
+        self.signer = signer
+        servicesEnabled = startServices
+        self.decisionSender = decisionSender
+        guard startServices else { store = nil; return }
         store = try? TargetStore()
         if let store {
             do { targets = try store.load() }
@@ -58,9 +71,9 @@ final class SynModel: ObservableObject {
             guard !targets.contains(where: { $0.targetID == target.targetID }) else {
                 throw SynProtocolError.invalid("A target with this ID is already paired")
             }
-            targets.append(target)
             guard let store else { throw SynProtocolError.invalid("target storage is unavailable") }
-            try store.save(targets)
+            try store.save(targets + [target])
+            targets.append(target)
             pairingProfileText = ""
             connect(target)
         } catch {
@@ -104,59 +117,67 @@ final class SynModel: ObservableObject {
 
     func approve(_ requestID: String) async {
         guard let request = pending.first(where: { $0.id == requestID }) else { return }
+        guard authenticatingRequests.insert(requestID).inserted else { return }
+        defer { authenticatingRequests.remove(requestID) }
         guard !request.isExpired else {
             finish(request)
             lastError = "That approval request has expired."
             return
         }
+        let decision: Data
         do {
-            let publicKeys = try keyStore.publicIdentities()
-            let keyID = Data(SHA256.hash(data: publicKeys.approval))
-            let payload = try SynProtocol.decisionPayload(
+            decision = try await DecisionBuilder.sign(
                 request: request,
                 approve: true,
-                approverKeyID: keyID
+                reason: "Approve this one sudo invocation on \(target(for: request)?.displayName ?? request.targetID)",
+                signer: signer
             )
-            let protected = try SynProtocol.protectedHeader(keyID: keyID)
-            let signatureInput = try SynProtocol.signatureStructure(protected: protected, payload: payload)
-            let signed = try keyStore.signApproval(
-                payload: signatureInput,
-                reason: "Approve this one sudo invocation on \(target(for: request)?.displayName ?? request.targetID)"
-            )
-            guard signed.keyID == keyID else { throw SynProtocolError.invalid("approval key changed unexpectedly") }
-            let decision = try SynProtocol.coseSign1(payload: payload, keyID: keyID, signature: signed.signature)
-            try await send(.init(kind: .decision, body: decision), to: request.targetID)
-            finish(request)
         } catch {
-            lastError = "Approval was not sent: \(error.localizedDescription)"
+            // Canceling or failing system authentication is a denial, not silence
+            // that could later open the Pi's ordinary-unavailability fallback.
+            await deny(requestID)
+            if lastError == nil { lastError = "Approval canceled or unsuccessful. Nothing was approved." }
+            return
+        }
+        guard !request.isExpired, pending.contains(where: { $0.id == request.id }) else {
+            finish(request)
+            lastError = "The request expired or was canceled while macOS checked your identity. Nothing was approved."
+            return
+        }
+        // Once delivery starts, a lost connection cannot tell us whether the
+        // target received the decision. Never describe that as proven denial.
+        finish(request)
+        do {
+            try await send(.init(kind: .decision, body: decision), to: request.targetID)
+        } catch {
+            lastError = "Approval delivery could not be confirmed. Check the original Pi invocation before retrying."
         }
     }
 
     func deny(_ requestID: String) async {
         guard let request = pending.first(where: { $0.id == requestID }) else { return }
+        // Remove first: an approval already waiting for authentication may no
+        // longer send, even if denial signing or delivery subsequently fails.
+        finish(request)
+        guard !request.isExpired else { return }
         do {
-            let publicKeys = try keyStore.publicIdentities()
-            let keyID = Data(SHA256.hash(data: publicKeys.denial))
-            let payload = try SynProtocol.decisionPayload(
+            let decision = try await DecisionBuilder.sign(
                 request: request,
                 approve: false,
-                approverKeyID: keyID
+                reason: "",
+                signer: signer
             )
-            let protected = try SynProtocol.protectedHeader(keyID: keyID)
-            let signatureInput = try SynProtocol.signatureStructure(protected: protected, payload: payload)
-            let signed = try keyStore.signDenial(payload: signatureInput)
-            guard signed.keyID == keyID else { throw SynProtocolError.invalid("denial key changed unexpectedly") }
-            let decision = try SynProtocol.coseSign1(payload: payload, keyID: keyID, signature: signed.signature)
+            guard !request.isExpired else { return }
             try await send(.init(kind: .decision, body: decision), to: request.targetID)
-            finish(request)
         } catch {
-            lastError = "Denial was not sent: \(error.localizedDescription)"
+            lastError = "Denial could not reach the Pi. Nothing was approved, but the Pi may offer its timeout fallback."
         }
     }
 
     func review(_ requestID: String) {
         selectedRequestID = requestID
-        NSApp.activate(ignoringOtherApps: true)
+        openMainWindow?()
+        if servicesEnabled { NSApp.activate(ignoringOtherApps: true) }
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -221,21 +242,23 @@ final class SynModel: ObservableObject {
                     guard !request.isExpired, request.issuedAt.timeIntervalSinceNow < 30 else {
                         throw SynProtocolError.invalid("request is expired or issued in the future")
                     }
-                    if let existing = seenRequestHashes[request.id] {
-                        guard existing == request.payloadHash else {
+                    pruneExpiredRequests()
+                    if let existing = seenRequests[request.id] {
+                        guard existing.hash == request.payloadHash else {
                             throw SynProtocolError.invalid("request ID was reused with a different payload")
                         }
                         return
                     }
-                    seenRequestHashes[request.id] = request.payloadHash
-                    pending.append(request)
+                    try enqueueVerified(request)
                     Task { try? await notifications.post(request: request, targetName: target.displayName) }
                 case .cancel:
                     let map = try CBORCodec.decodeCanonical(message.body).integerKeyedMap()
                     guard map.count == 1, let requestID = map[0]?.bytesValue else {
                         throw SynProtocolError.invalid("invalid cancellation")
                     }
-                    if let request = pending.first(where: { $0.requestID == requestID }) { finish(request) }
+                    if let request = pending.first(where: {
+                        $0.targetID == target.targetID && $0.requestID == requestID
+                    }) { finish(request) }
                 case .ping:
                     let connection = connections[target.targetID]
                     Task { try? await connection?.send(.init(kind: .pong, body: message.body)) }
@@ -249,6 +272,7 @@ final class SynModel: ObservableObject {
     }
 
     private func send(_ message: WireMessage, to targetID: String) async throws {
+        if let decisionSender { try await decisionSender(message, targetID); return }
         guard let connection = connections[targetID] else { throw URLError(.notConnectedToInternet) }
         try await connection.send(message)
     }
@@ -268,7 +292,32 @@ final class SynModel: ObservableObject {
 
     private func finish(_ request: VerifiedApprovalRequest) {
         pending.removeAll { $0.id == request.id }
-        notifications.remove(requestID: request.id)
+        if servicesEnabled { notifications.remove(requestID: request.id) }
         if selectedRequestID == request.id { selectedRequestID = pending.first?.id }
+    }
+
+    func enqueueVerified(_ request: VerifiedApprovalRequest) throws {
+        pruneExpiredRequests()
+        guard !request.isExpired else { throw SynProtocolError.invalid("request has expired") }
+        guard pending.filter({ $0.targetID == request.targetID }).count < 16, seenRequests.count < 4096 else {
+            throw SynProtocolError.invalid("target approval queue is full")
+        }
+        guard !pending.contains(where: { $0.id == request.id }) else {
+            throw SynProtocolError.invalid("request is already pending")
+        }
+        seenRequests[request.id] = (request.payloadHash, request.expiresAt)
+        pending.append(request)
+        if servicesEnabled {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(max(0, request.expiresAt.timeIntervalSinceNow)))
+                guard let self else { return }
+                self.pruneExpiredRequests()
+            }
+        }
+    }
+
+    private func pruneExpiredRequests() {
+        for request in pending where request.isExpired { finish(request) }
+        seenRequests = seenRequests.filter { $0.value.expiresAt > .now }
     }
 }

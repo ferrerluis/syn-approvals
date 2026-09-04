@@ -26,7 +26,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tracing::{info, warn};
 
 const REQUEST_BROADCAST_CAPACITY: usize = 64;
@@ -345,10 +345,20 @@ async fn handle_network(
     state: Arc<AgentState>,
     acceptor: TlsAcceptor,
 ) -> Result<()> {
-    let tls = acceptor.accept(stream).await.context("mutual TLS failed")?;
-    let mut websocket = tokio_tungstenite::accept_async(tls)
+    let tls = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream))
         .await
-        .context("WebSocket upgrade failed")?;
+        .context("mutual TLS timed out")?
+        .context("mutual TLS failed")?;
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_WIRE_BYTES))
+        .max_frame_size(Some(MAX_WIRE_BYTES));
+    let mut websocket = tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::accept_async_with_config(tls, Some(config)),
+    )
+    .await
+    .context("WebSocket upgrade timed out")?
+    .context("WebSocket upgrade failed")?;
     let hello = HelloV1 {
         minimum_version: PROTOCOL_VERSION,
         maximum_version: PROTOCOL_VERSION,
@@ -400,7 +410,16 @@ async fn handle_network(
         tokio::select! {
             incoming = websocket.next() => {
                 let Some(incoming) = incoming else { break };
-                match incoming? {
+                let incoming = match incoming {
+                    Ok(message) => message,
+                    Err(error) => {
+                        if websocket_error_is_integrity_failure(&error) {
+                            hard_fail_pending(&state).await;
+                        }
+                        return Err(error.into());
+                    }
+                };
+                match incoming {
                     Message::Binary(bytes) => {
                         let message = match WireMessageV1::decode(&bytes) {
                             Ok(message) => message,
@@ -442,6 +461,14 @@ async fn handle_network(
         }
     }
     Ok(())
+}
+
+fn websocket_error_is_integrity_failure(error: &tokio_tungstenite::tungstenite::Error) -> bool {
+    use tokio_tungstenite::tungstenite::Error;
+    !matches!(
+        error,
+        Error::Io(_) | Error::Tls(_) | Error::ConnectionClosed | Error::AlreadyClosed
+    )
 }
 
 async fn route_decision(signed: &[u8], state: &AgentState) -> Result<()> {
@@ -662,6 +689,7 @@ mod tests {
         };
         assert_eq!(routed, signed);
         assert!(state.pending.lock().await.is_empty());
+        assert!(route_decision(&signed, &state).await.is_err());
     }
 
     #[test]
@@ -699,6 +727,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn malformed_websocket_is_not_ordinary_unavailability() {
+        use tokio_tungstenite::tungstenite::{error::CapacityError, Error};
+        assert!(websocket_error_is_integrity_failure(&Error::Capacity(
+            CapacityError::MessageTooLong {
+                size: MAX_WIRE_BYTES + 1,
+                max_size: MAX_WIRE_BYTES
+            }
+        )));
+        assert!(!websocket_error_is_integrity_failure(
+            &Error::ConnectionClosed
+        ));
+        assert!(!websocket_error_is_integrity_failure(&Error::Io(
+            std::io::ErrorKind::ConnectionReset.into()
+        )));
+    }
+
     #[tokio::test]
     async fn forged_approval_is_rejected_and_stays_pending() {
         let (state, request, _approval, _response_rx) = state_with_pending().await;
@@ -712,6 +757,42 @@ mod tests {
         let signed = sign_decision(&decision, &attacker).unwrap();
         assert!(route_decision(&signed, &state).await.is_err());
         assert_eq!(state.pending.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn late_wrong_target_and_modified_decisions_hard_fail_the_waiter() {
+        for case in ["late", "target", "modified"] {
+            let (state, request, approval, response_rx) = state_with_pending().await;
+            let mut decision = DecisionV1::for_request(
+                &request,
+                DecisionAction::ApproveOnce,
+                AuthenticationClass::SystemUserPresence,
+                approval.verifying_key(),
+            );
+            if case == "target" {
+                decision.target_id = "another-target".into();
+            }
+            if case == "late" {
+                state
+                    .pending
+                    .lock()
+                    .await
+                    .get_mut(&hex::encode(request.request.request_id.as_slice()))
+                    .unwrap()
+                    .deadline = Instant::now();
+            }
+            let mut signed = sign_decision(&decision, &approval).unwrap();
+            if case == "modified" {
+                *signed.last_mut().unwrap() ^= 1;
+            }
+            assert!(route_decision(&signed, &state).await.is_err());
+            // This is the same failure transition used by the network handler.
+            hard_fail_pending(&state).await;
+            assert!(matches!(
+                response_rx.await.unwrap(),
+                LocalResponse::IntegrityFailure
+            ));
+        }
     }
 
     #[tokio::test]

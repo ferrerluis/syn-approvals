@@ -21,6 +21,7 @@ const PLUGIN_LINE: &str =
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstallPlan {
+    pub shadow_mode: bool,
     pub supported_target: bool,
     pub managed_user: String,
     pub managed_uid: Option<u32>,
@@ -35,7 +36,7 @@ pub struct RecoveryResult {
     pub actions: Vec<String>,
 }
 
-pub fn plan(user: &str, state_path: &Path) -> Result<InstallPlan> {
+pub fn plan(user: &str, state_path: &Path, shadow: bool) -> Result<InstallPlan> {
     validate_user(user)?;
     let managed_uid = lookup_uid(user);
     let supported_target = std::env::consts::OS == "linux"
@@ -74,6 +75,20 @@ pub fn plan(user: &str, state_path: &Path) -> Result<InstallPlan> {
             state_path.display()
         ));
     }
+    if state_path != Path::new(syn_config::DEFAULT_INSTALL_STATE) {
+        blockers.push("automatic recovery requires the standard install-state path".into());
+    }
+    if Path::new(SUDOERS_RULE).exists() {
+        blockers.push("existing Syn sudoers rule must be recovered before installation".into());
+    }
+    if let Ok(contents) = fs::read_to_string(SUDO_CONF) {
+        if contents.lines().any(|line| {
+            let mut words = line.split_whitespace();
+            words.next() == Some("Plugin") && words.next() == Some("syn_approval")
+        }) {
+            blockers.push("Syn approval plug-in is already registered".into());
+        }
+    }
     if !recovery_timer::has_minimum_remaining(recovery_timer::MIN_INSTALL_RECOVERY_SECONDS) {
         blockers
             .push("Pi-local automatic sudo recovery needs at least 10 minutes remaining".into());
@@ -83,11 +98,27 @@ pub fn plan(user: &str, state_path: &Path) -> Result<InstallPlan> {
         Err(error) => blockers.push(format!("staged security state is invalid: {error:#}")),
     }
     Ok(InstallPlan {
+        shadow_mode: shadow,
         supported_target,
         managed_user: user.into(),
         managed_uid,
         state_path: state_path.into(),
-        actions: vec![
+        actions: installation_actions(shadow),
+        blockers,
+    })
+}
+
+fn installation_actions(shadow: bool) -> Vec<String> {
+    if shadow {
+        vec![
+            "record a protected sudo.conf backup and shadow recovery state".into(),
+            "preserve the current sudo alternative and provider modes".into(),
+            "enable the root-owned Syn approval plug-in for direct sudo.ws tests".into(),
+            "validate plug-in loading and sudoers syntax".into(),
+            "keep ordinary password authentication; do not create a NOPASSWD rule".into(),
+        ]
+    } else {
+        vec![
             "record current sudo alternative and provider modes".into(),
             "persistently remove setuid from alternate sudo providers".into(),
             "select /usr/bin/sudo.ws".into(),
@@ -95,9 +126,8 @@ pub fn plan(user: &str, state_path: &Path) -> Result<InstallPlan> {
             "validate plug-in loading and sudoers syntax".into(),
             "enable and start the rootless syn-agent service".into(),
             "add the managed one-user NOPASSWD rule last".into(),
-        ],
-        blockers,
-    })
+        ]
+    }
 }
 
 fn validate_staged_security_state(user: &str, uid: Option<u32>) -> Result<()> {
@@ -144,6 +174,8 @@ fn validate_staged_security_state(user: &str, uid: Option<u32>) -> Result<()> {
 
 pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
     require_root()?;
+    // Re-read live prerequisites; never apply a stale preview.
+    let plan = self::plan(&plan.managed_user, state_path, plan.shadow_mode)?;
     if !plan.blockers.is_empty() {
         bail!("installation is blocked: {}", plan.blockers.join("; "));
     }
@@ -153,6 +185,9 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
     }
     if !recovery_timer::has_minimum_remaining(recovery_timer::MIN_INSTALL_RECOVERY_SECONDS) {
         bail!("automatic sudo recovery timer has less than 10 minutes remaining");
+    }
+    if plan.shadow_mode {
+        return apply_shadow(&plan, state_path, managed_uid);
     }
 
     let previous_alternative = fs::read_link("/etc/alternatives/sudo")
@@ -210,6 +245,9 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
         stat_overrides: stat_overrides.clone(),
         created_paths: vec![PathBuf::from(SUDOERS_RULE)],
         sudo_conf_backup: Some(backup),
+        shadow_mode: false,
+        sudo_conf_original_mode: Some(fs::metadata(SUDO_CONF)?.mode() & 0o7777),
+        previous_sudo_alternative_auto: Some(sudo_alternative_auto()?),
     };
     write_state(state_path, &state)?;
 
@@ -289,9 +327,16 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
 }
 
 pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
+    validate_root_file(state_path)?;
     let state: InstallState = serde_json::from_slice(
         &fs::read(state_path).with_context(|| format!("read {}", state_path.display()))?,
     )?;
+    if state.schema_version != 1 {
+        bail!("unsupported installation state schema");
+    }
+    if state.shadow_mode {
+        return recover_shadow(state_path, &state, apply);
+    }
     let mut actions = vec![
         format!("remove {SUDOERS_RULE}"),
         "restore the pre-Syn sudo.conf backup".into(),
@@ -310,14 +355,20 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
     if Path::new(SUDOERS_RULE).exists() {
         fs::remove_file(SUDOERS_RULE)?;
     }
-    recovery_timer::disarm_after_recovery()?;
     if let Some(backup) = &state.sudo_conf_backup {
-        if backup.exists() {
-            atomic_write(Path::new(SUDO_CONF), &fs::read(backup)?, 0o644)?;
-        }
+        validate_root_file(backup)?;
+        atomic_write(
+            Path::new(SUDO_CONF),
+            &fs::read(backup)?,
+            state.sudo_conf_original_mode.unwrap_or(0o644),
+        )?;
     }
     if let Some(previous) = &state.previous_sudo_alternative {
-        run("update-alternatives", &["--set", "sudo", previous])?;
+        if state.previous_sudo_alternative_auto == Some(true) {
+            run("update-alternatives", &["--auto", "sudo"])?;
+        } else {
+            run("update-alternatives", &["--set", "sudo", previous])?;
+        }
     }
     for record in &state.stat_overrides {
         let path = record.path.to_string_lossy();
@@ -344,7 +395,150 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
         .args(["disable", "--now", "syn-agent.service"])
         .status();
     run("/usr/sbin/visudo.ws", &["-cf", "/etc/sudoers"])?;
+    recovery_timer::disarm_after_recovery()?;
     actions.push("ordinary password sudo restored; keys retained".into());
+    Ok(RecoveryResult {
+        applied: true,
+        actions,
+    })
+}
+
+fn sudo_alternative_auto() -> Result<bool> {
+    let query = command_stdout("update-alternatives", &["--query", "sudo"])?;
+    parse_alternative_auto(&query)
+}
+
+fn parse_alternative_auto(query: &str) -> Result<bool> {
+    match query.lines().find_map(|line| line.strip_prefix("Status: ")) {
+        Some("auto") => Ok(true),
+        Some("manual") => Ok(false),
+        _ => bail!("sudo alternative selection mode is missing or unknown"),
+    }
+}
+
+fn validate_root_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        bail!(
+            "{} must be a root-owned regular file protected from writes",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn apply_shadow(plan: &InstallPlan, state_path: &Path, managed_uid: u32) -> Result<()> {
+    validate_root_file(Path::new(SUDO_CONF))?;
+    validate_root_file(Path::new(PLUGIN_PATH))?;
+    let original = fs::read(SUDO_CONF)?;
+    let original_mode = fs::metadata(SUDO_CONF)?.mode() & 0o7777;
+    let backup = PathBuf::from(format!(
+        "/var/lib/syn/backups/sudo.conf.shadow.{}",
+        syn_protocol::unix_time_ms()
+    ));
+    // create_new refuses collisions and symlinks; retain this backup after recovery.
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&backup)?;
+    file.write_all(&original)?;
+    file.sync_all()?;
+    fs::File::open(backup.parent().context("shadow backup parent is missing")?)?.sync_all()?;
+    let mut state = InstallState {
+        schema_version: 1,
+        phase: "shadow_prepared".into(),
+        managed_user: plan.managed_user.clone(),
+        managed_uid,
+        previous_sudo_alternative: Some(
+            fs::read_link("/etc/alternatives/sudo")?
+                .display()
+                .to_string(),
+        ),
+        previous_sudo_alternative_auto: Some(sudo_alternative_auto()?),
+        stat_overrides: vec![],
+        created_paths: vec![],
+        sudo_conf_backup: Some(backup),
+        sudo_conf_original_mode: Some(original_mode),
+        shadow_mode: true,
+    };
+    // The timer can recover even if the process dies immediately after this write.
+    write_state(state_path, &state)?;
+    let result = (|| -> Result<()> {
+        let mut contents = String::from_utf8(original)?;
+        if !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(PLUGIN_LINE);
+        contents.push('\n');
+        atomic_write(Path::new(SUDO_CONF), contents.as_bytes(), original_mode)?;
+        run("/usr/bin/sudo.ws", &["-V"])?;
+        run("/usr/sbin/visudo.ws", &["-cf", "/etc/sudoers"])?;
+        if Path::new(SUDOERS_RULE).exists() {
+            bail!("unexpected Syn sudoers rule during shadow setup");
+        }
+        state.phase = "shadow_enabled".into();
+        write_state(state_path, &state)
+    })();
+    if let Err(error) = result {
+        if let Err(rollback) = recover_shadow(state_path, &state, true) {
+            bail!("shadow setup failed: {error:#}; recovery also failed: {rollback:#}");
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn recover_shadow(state_path: &Path, state: &InstallState, apply: bool) -> Result<RecoveryResult> {
+    let actions = vec![
+        format!("remove {SUDOERS_RULE} first if present"),
+        "restore original sudo.conf contents and mode".into(),
+        "preserve providers and agent state, which shadow setup does not change".into(),
+        "validate sudoers, archive shadow state, and cancel automatic recovery".into(),
+    ];
+    if !apply {
+        return Ok(RecoveryResult {
+            applied: false,
+            actions,
+        });
+    }
+    require_root()?;
+    if Path::new(SUDOERS_RULE).exists() {
+        fs::remove_file(SUDOERS_RULE)?;
+    }
+    let backup = state
+        .sudo_conf_backup
+        .as_ref()
+        .context("shadow backup is missing from state")?;
+    validate_root_file(backup)?;
+    let original = fs::read(backup)?;
+    atomic_write(
+        Path::new(SUDO_CONF),
+        &original,
+        state
+            .sudo_conf_original_mode
+            .context("shadow backup mode is missing")?,
+    )?;
+    if fs::read(SUDO_CONF)? != original {
+        bail!("shadow recovery content verification failed");
+    }
+    run("/usr/sbin/visudo.ws", &["-cf", "/etc/sudoers"])?;
+    // Archive rather than overwrite: the next shadow/install run starts clean.
+    let archived = PathBuf::from(format!("{}.recovered-state.json", backup.display()));
+    if archived.exists() {
+        bail!("shadow recovery archive already exists");
+    }
+    fs::rename(state_path, &archived)?;
+    fs::File::open(
+        archived
+            .parent()
+            .context("shadow archive parent is missing")?,
+    )?
+    .sync_all()?;
+    fs::File::open(state_path.parent().context("state parent is missing")?)?.sync_all()?;
+    recovery_timer::disarm_after_recovery()?;
     Ok(RecoveryResult {
         applied: true,
         actions,
@@ -400,4 +594,37 @@ fn run(program: &str, arguments: &[&str]) -> Result<()> {
         bail!("{program} failed with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shadow_plan_never_changes_providers_or_adds_passwordless_access() {
+        let actions = installation_actions(true);
+        assert_eq!(actions.len(), 5);
+        assert!(actions
+            .iter()
+            .any(|action| action.contains("do not create a NOPASSWD rule")));
+        assert!(!actions.iter().any(|action| action.starts_with("select ")
+            || action.starts_with("persistently remove")
+            || action.starts_with("add ")));
+        let armed = installation_actions(false);
+        assert_eq!(
+            armed.last().unwrap(),
+            "add the managed one-user NOPASSWD rule last"
+        );
+        assert!(armed
+            .iter()
+            .any(|action| action.contains("persistently remove setuid")));
+    }
+
+    #[test]
+    fn alternative_selection_mode_is_preserved_and_unknown_modes_rejected() {
+        assert!(parse_alternative_auto("Name: sudo\nStatus: auto\n").unwrap());
+        assert!(!parse_alternative_auto("Name: sudo\nStatus: manual\n").unwrap());
+        assert!(parse_alternative_auto("Name: sudo\n").is_err());
+        assert!(parse_alternative_auto("Status: unexpected\n").is_err());
+    }
 }

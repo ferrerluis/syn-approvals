@@ -29,6 +29,12 @@ sudo synctl pair accept-approver \
 
 Create the Mac transport identity with `scripts/create-mac-client-identity.sh`. Transfer only its public certificate to the Pi, then create the target TLS material with `scripts/create-target-tls.sh`; keep all private keys on their owning device.
 
+The Mac script uses a short-lived PKCS#12 wrapping password passed only through stdin to OpenSSL and a native import helper. Private temporary files are confined to a private directory and removed afterward; the permanent transport key is imported into Keychain with access assigned to Syn.app. The helper currently uses Apple's legacy per-app Keychain ACL APIs. Ad-hoc rebuilding changes the app identity and may require renewed Keychain permission; do not grant Syn access to unrelated Apple signing keys. A stable developer signing identity is preferable for repeated UI validation.
+
+The app selects the labeled **certificate**, resolves its matching private key, and verifies that the resulting identity contains exactly that certificate. Do not replace this with an identity query filtered only by label: live macOS testing showed that query returning an unrelated identity.
+
+The native transport uses Network.framework with TLS 1.3, exact certificate pinning, per-connection trust anchors, hostname/validity checks, and a 64 KiB message limit. It does not add system trust entries or disable ATS for other traffic. See Apple's [manual server-trust guidance](https://developer.apple.com/documentation/Foundation/performing-manual-server-trust-authentication) for the URLSession/ATS restriction and [identity import documentation](https://developer.apple.com/documentation/security/importing-an-identity) for the nonempty PKCS#12 password requirement.
+
 After configuring and starting `syn-agent`, create the exact pinned Mac profile:
 
 ```sh
@@ -54,6 +60,8 @@ sudo synctl test fallback
 The approval test presents a synthetic `/usr/bin/true` request and never executes it. The fallback test is read-only in the current build; therefore the real PAM path remains unproven and installation must not proceed until the live plan's recovery timer and root path are proven.
 
 ## 4. Inspect, arm, and recover
+
+Complete the live plan's shadow phase before normal activation. Use `install --user NAME --shadow` with the same preview, signed-preflight, timer, and recovery acknowledgment requirements. This loads the plug-in for direct `/usr/bin/sudo.ws` tests while leaving the default provider and ordinary password authentication unchanged. Recover afterward; only then consider the normal installation below.
 
 On the recoverable Pi, prove and arm the timed rollback before inspecting the install plan:
 

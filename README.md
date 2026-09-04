@@ -65,6 +65,8 @@ Security-sensitive mutations require root and an explicit `--apply`. There is de
 
 Before installation, `synctl recovery prove --apply` exercises a harmless local timer and `synctl recovery arm --minutes 15 --apply` creates the required absolute, reboot-persistent rollback deadline.
 
+For Phase 6, preview `synctl --json install --user NAME --shadow`. Adding `--apply --acknowledge-console-recovery` records recovery state and registers the plug-in, but **does not** change the sudo alternative, provider modes, agent state, or passwordless policy. Test by invoking `/usr/bin/sudo.ws` directly. `synctl recover --restore-local-sudo --apply` restores the original file and permissions, archives the shadow state, and cancels the timer after recovery succeeds. A fresh signed preflight and at least ten minutes of rollback time are still required.
+
 ## Supported alpha
 
 - Target: Ubuntu 26.04 ARM64 with classic `sudo.ws` 1.9.x.

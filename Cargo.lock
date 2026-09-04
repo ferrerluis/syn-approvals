@@ -1091,6 +1091,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "syn-config",
  "syn-protocol",
  "toml",

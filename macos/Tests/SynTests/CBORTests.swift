@@ -45,6 +45,16 @@ private struct GoldenFixture: Decodable {
     #expect(decoded.body == Data([1, 2, 3]))
 }
 
+@Test func oversizedWireKindFailsWithoutIntegerTrap() throws {
+    for kind in [UInt64(256), UInt64.max] {
+        let data = try CBORCodec.encode(.map([
+            (.unsigned(0), .unsigned(1)), (.unsigned(1), .unsigned(kind)),
+            (.unsigned(2), .bytes(Data())),
+        ]))
+        #expect(throws: SynProtocolError.self) { _ = try WireMessage(data: data) }
+    }
+}
+
 @Test func rustGoldenRequestVerifiesInSwift() throws {
     let url = try #require(
         Bundle.module.url(forResource: "protocol-v1", withExtension: "json", subdirectory: "Fixtures")

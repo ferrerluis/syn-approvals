@@ -1,3 +1,4 @@
+import CryptoKit
 import ServiceManagement
 import SwiftUI
 
@@ -11,6 +12,7 @@ struct SynMenuView: View {
         } else {
             ForEach(model.pending) { request in
                 Button {
+                    openWindow(id: "main")
                     model.review(request.id)
                 } label: {
                     Text("\(model.target(for: request)?.displayName ?? request.targetID): \(SafeDisplay.render(request.executable))")
@@ -29,6 +31,7 @@ struct SynMenuView: View {
 
 struct SynContentView: View {
     @ObservedObject var model: SynModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -49,6 +52,8 @@ struct SynContentView: View {
                                 .fill(model.connectedTargets.contains(target.targetID) ? .green : .gray)
                                 .frame(width: 8, height: 8)
                             Text(target.displayName)
+                            Text(model.connectedTargets.contains(target.targetID) ? "Connected" : "Disconnected")
+                                .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -62,6 +67,7 @@ struct SynContentView: View {
             }
         }
         .frame(minWidth: 840, minHeight: 580)
+        .onAppear { model.openMainWindow = { openWindow(id: "main") } }
         .alert("Syn", isPresented: Binding(
             get: { model.lastError != nil },
             set: { if !$0 { model.lastError = nil } }
@@ -86,6 +92,9 @@ private struct ApprovalDetailView: View {
                     Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
                         row("Target", model.target(for: request)?.displayName ?? request.targetID)
                         row("Target ID", request.targetID)
+                        row("Target fingerprint", model.target(for: request)?.publicKey.map {
+                            Data(SHA256.hash(data: $0.x963Representation)).hex
+                        } ?? "Unavailable")
                         row("Request", request.id)
                         row("Source user", "\(request.invokingUser) (\(request.invokingUID))")
                         row("Run as", "\(request.runAsUser) (\(request.runAsUID)), group \(request.runAsGroup)")
@@ -126,7 +135,7 @@ private struct ApprovalDetailView: View {
                         Spacer()
                         Button("Approve once") { Task { await model.approve(request.id) } }
                             .buttonStyle(.borderedProminent)
-                            .disabled(timeline.date >= request.expiresAt)
+                            .disabled(timeline.date >= request.expiresAt || model.authenticatingRequests.contains(request.id))
                     }
                 }
                 .padding(28)

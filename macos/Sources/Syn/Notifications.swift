@@ -22,19 +22,26 @@ final class SynNotificationCenter: NSObject, UNUserNotificationCenterDelegate, @
             options: []
         )
         center.setNotificationCategories([category])
-        _ = try await center.requestAuthorization(options: [.alert, .sound])
+        guard try await center.requestAuthorization(options: [.alert, .sound]) else {
+            throw SynProtocolError.invalid("Enable Syn notifications in System Settings to receive approval alerts")
+        }
     }
 
     func post(request: VerifiedApprovalRequest, targetName: String) async throws {
-        let content = UNMutableNotificationContent()
-        content.title = "Syn approval requested"
-        content.body = "\(targetName) · \(request.invokingUser) · just now"
-        content.categoryIdentifier = Self.category
-        content.userInfo = ["requestID": request.id]
-        content.sound = .default
+        let content = Self.content(request: request, targetName: targetName)
         try await UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: "syn-\(request.id)", content: content, trigger: nil)
         )
+    }
+
+    static func content(request: VerifiedApprovalRequest, targetName: String) -> UNMutableNotificationContent {
+        let content = UNMutableNotificationContent()
+        content.title = "Syn approval requested"
+        content.body = "\(SafeDisplay.render(Data(targetName.utf8))) · \(SafeDisplay.render(Data(request.invokingUser.utf8))) · just now"
+        content.categoryIdentifier = Self.category
+        content.userInfo = ["requestID": request.id]
+        content.sound = .default
+        return content
     }
 
     func remove(requestID: String) {

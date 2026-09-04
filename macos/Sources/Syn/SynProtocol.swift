@@ -21,7 +21,8 @@ struct WireMessage: Sendable {
         guard data.count <= 65_536 else { throw SynProtocolError.invalid("message exceeds 64 KiB") }
         let map = try CBORCodec.decodeCanonical(data).integerKeyedMap()
         guard map.count == 3, map[0]?.unsignedValue == 1,
-              let rawKind = map[1]?.unsignedValue, let kind = SynMessageKind(rawValue: UInt8(rawKind)),
+              let rawKind = map[1]?.unsignedValue, let byteKind = UInt8(exactly: rawKind),
+              let kind = SynMessageKind(rawValue: byteKind),
               let body = map[2]?.bytesValue else { throw SynProtocolError.invalid("invalid wire envelope") }
         self.kind = kind
         self.body = body
@@ -64,7 +65,9 @@ struct VerifiedApprovalRequest: Identifiable, Sendable {
     let environmentDigest: Data
     let riskMarkers: [String]
 
-    var id: String { requestID.hex }
+    // IDs used by UI, notifications, and in-memory routing include the pinned
+    // target. A second target cannot collide with another target's request ID.
+    var id: String { "\(targetID):\(requestID.hex)" }
     var isExpired: Bool { Date() >= expiresAt }
 }
 

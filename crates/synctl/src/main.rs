@@ -223,6 +223,9 @@ enum RecoveryCommand {
 struct InstallArguments {
     #[arg(long)]
     user: String,
+    /// Test sudo.ws directly without changing providers or adding NOPASSWD.
+    #[arg(long)]
+    shadow: bool,
     /// Perform changes. Without this flag the command is read-only.
     #[arg(long)]
     apply: bool,
@@ -439,7 +442,7 @@ fn run(cli: &Cli) -> Result<()> {
             }
         },
         TopLevel::Install(arguments) => {
-            let plan = installer::plan(&arguments.user, &arguments.state)?;
+            let plan = installer::plan(&arguments.user, &arguments.state, arguments.shadow)?;
             if arguments.apply {
                 if !arguments.acknowledge_console_recovery {
                     bail!("--apply requires --acknowledge-console-recovery");

@@ -305,6 +305,13 @@ pub struct InstallState {
     #[serde(default)]
     pub created_paths: Vec<PathBuf>,
     pub sudo_conf_backup: Option<PathBuf>,
+    /// Shadow testing never changes sudo providers or creates passwordless access.
+    #[serde(default)]
+    pub shadow_mode: bool,
+    #[serde(default)]
+    pub sudo_conf_original_mode: Option<u32>,
+    #[serde(default)]
+    pub previous_sudo_alternative_auto: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

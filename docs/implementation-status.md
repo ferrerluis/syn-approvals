@@ -16,6 +16,8 @@ This repository is a compiling security-alpha foundation, not a reviewed or depl
 
 ## Not yet proven or complete
 
+- **Phases 5–6 are in progress, not passed.** A pinned connection and root-signed synthetic request reached the Mac review UI. Live Deny stalled on Keychain permission; revised signing/cancellation paths pass 16 Swift tests but need live revalidation. The updated native package is installed and the rootless relay runs with unchanged sudo settings. Keychain authorization still needs the user; no sudo plug-in registration or passwordless rule has been applied. [Current evidence and remaining gates](validation/2026-09-04-phases-5-6-progress.md).
+
 - The sudo plug-in has been built, linked, and unit-tested natively on the Ubuntu 26.04 ARM64 Pi, but not loaded into a real `sudo.ws` invocation.
 - The PAM fallback has not been exercised with the real Ubuntu common-auth stack.
 - The transactional installer and `dpkg-statoverride` recovery have not been fault-injected on the target OS.
