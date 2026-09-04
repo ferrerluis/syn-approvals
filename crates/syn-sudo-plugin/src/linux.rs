@@ -31,6 +31,7 @@ const SUDO_CONV_PROMPT_ECHO_ON: c_int = 0x0002;
 const SUDO_CONV_ERROR_MSG: c_int = 0x0003;
 const SUDO_CONV_INFO_MSG: c_int = 0x0004;
 static GENERIC_ERROR: &[u8] = b"Syn denied due to an internal approval error\0";
+const DENIAL_NOTICE: &str = "Syn approval was denied or Mac authentication was canceled. Rerun sudo to create a new request.\n";
 
 type SudoConv = unsafe extern "C" fn(
     num_msgs: c_int,
@@ -290,7 +291,9 @@ unsafe extern "C" fn plugin_check(
             DecisionOutcome::Approve => Ok(1),
             DecisionOutcome::Expired => fallback_or_deny(&state, &config, &policy),
             DecisionOutcome::Deny => {
-                hard_notice("Syn denied this sudo invocation.\n");
+                // A signed denial intentionally does not reveal whether the
+                // user chose Deny or canceled the system authentication sheet.
+                hard_notice(DENIAL_NOTICE);
                 Ok(0)
             }
         }
@@ -1022,6 +1025,68 @@ mod tests {
         assert!(evaluate(&signed_approval, &different_request, expired_start).is_err());
         assert!(evaluate(&signed_denial, &different_request, expired_start).is_err());
         assert!(evaluate(b"malformed", &request, expired_start).is_err());
+    }
+
+    #[test]
+    fn signed_approval_cannot_be_replayed_against_changed_execution_intent() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+        // Offline fixture keys only; never read a deployed signing identity.
+        let target = SigningKey::from_slice(&[1_u8; 32]).unwrap();
+        let approval = SigningKey::from_slice(&[2_u8; 32]).unwrap();
+        let denial = SigningKey::from_slice(&[3_u8; 32]).unwrap();
+        let original = verify_request(
+            &hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let signed_approval =
+            hex::decode(fixture["signed_approval_hex"].as_str().unwrap()).unwrap();
+        for case in [
+            "target",
+            "nonce",
+            "request_id",
+            "argv",
+            "environment",
+            "run_as",
+        ] {
+            let mut changed = original.request.clone();
+            match case {
+                "target" => changed.target_id = "different-target".into(),
+                "nonce" => changed.nonce = vec![9; 32].into(),
+                "request_id" => changed.request_id = vec![9; 16].into(),
+                "argv" => changed
+                    .sudo
+                    .argv
+                    .push(b"different-argument".to_vec().into()),
+                "environment" => changed.sudo.environment_digest = vec![9; 32].into(),
+                "run_as" => changed.sudo.run_as_uid = 1234,
+                _ => unreachable!(),
+            }
+            let signed_changed = sign_request(&changed, &target).unwrap();
+            let verified_changed = verify_request(&signed_changed, target.verifying_key()).unwrap();
+            for started in [Instant::now(), Instant::now() - Duration::from_secs(30)] {
+                assert!(
+                    evaluate_decision(
+                        &signed_approval,
+                        &verified_changed,
+                        approval.verifying_key(),
+                        denial.verifying_key(),
+                        started,
+                        Duration::from_secs(30)
+                    )
+                    .is_err(),
+                    "{case} must hard-fail, not enter timeout fallback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn denial_notice_explains_cancellation_and_one_use_retry_without_claiming_a_reason() {
+        assert!(DENIAL_NOTICE.contains("denied or Mac authentication was canceled"));
+        assert!(DENIAL_NOTICE.contains("Rerun sudo to create a new request"));
+        assert!(!DENIAL_NOTICE.contains("password"));
     }
 
     #[test]

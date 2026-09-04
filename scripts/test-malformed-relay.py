@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """One-shot, root-only live fault injection. Never execute or log a request.
 
-Use only with shadow sudo, retained root recovery, and an armed rollback timer.
+Use only in a guarded shadow or armed-mode validation with retained root recovery
+and an armed rollback timer.
 Stop syn-agent first; this deliberately occupies its usual local socket. Restart
 syn-agent immediately afterward. Existing sockets are never replaced.
 """

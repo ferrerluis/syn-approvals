@@ -268,6 +268,8 @@ Any unexpected result triggers local recovery immediately; do not diagnose while
 
 ## Phase 8 — run the authentication matrix
 
+**Passed on 2026-09-04 UTC.** All authentication-matrix rows passed, including Mac password approval, fresh repeated/concurrent approvals, actual system cancellation, unavailable-agent/Mac behavior, signed-decision harness checks, live malformed replies, and missing-plug-in denial. Each fault was followed by restoration and a fresh ordinary-sudo approval. Final request `795aafa0ee12064c4d3ce2d6206580e4` returned root UID 0 and exit 0; doctor was healthy. Rollback remains enabled for **16:18:20 UTC (12:18:20 p.m. Eastern)**. This does not complete Phases 9–10 or permanently enable Syn. [Evidence and test-scope distinctions](validation/2026-09-04-phase-8.md).
+
 Use commands with harmless effects until the security states pass:
 
 | Test | Input | Required result |
