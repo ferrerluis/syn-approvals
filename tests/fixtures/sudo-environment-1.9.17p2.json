@@ -1,0 +1,44 @@
+{
+  "source": "https://github.com/sudo-project/sudo/blob/v1.9.17p2/plugins/sudoers/env.c",
+  "description": "Synthetic, source-derived ordinary command environment under Syn's explicit env_reset/env_keep/env_check policy; not a capture from a real user or an end-to-end sudo test.",
+  "inherited_retained": [
+    "LANG=en_US.UTF-8",
+    "LANGUAGE=en_US:en",
+    "LC_CTYPE=en_US.UTF-8",
+    "TERM=xterm-256color",
+    "COLORTERM=truecolor",
+    "DISPLAY=:10.0",
+    "XAUTHORITY=/home/managed/.Xauthority",
+    "DEBIAN_FRONTEND=noninteractive",
+    "DEBIAN_PRIORITY=critical",
+    "NEEDRESTART_MODE=a"
+  ],
+  "inherited_discarded": [
+    "LS_COLORS=di=01;34",
+    "XDG_CURRENT_DESKTOP=ubuntu:GNOME",
+    "HOSTNAME=synthetic-pi",
+    "LINGUAS=en_US",
+    "TZ=America/New_York",
+    "COLORS=256",
+    "PS1=synthetic-prompt",
+    "PS2=synthetic-continuation",
+    "KRB5CCNAME=FILE:/tmp/synthetic-cache",
+    "XAUTHORIZATION=synthetic-placeholder",
+    "LD_PRELOAD=/tmp/synthetic-blocked.so",
+    "APT_CONFIG=/tmp/synthetic-blocked.conf"
+  ],
+  "sudo_generated": [
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin",
+    "MAIL=/var/mail/root",
+    "LOGNAME=root",
+    "USER=root",
+    "HOME=/root",
+    "SHELL=/bin/bash",
+    "SUDO_COMMAND=/usr/bin/apt install gh",
+    "SUDO_USER=managed",
+    "SUDO_UID=1000",
+    "SUDO_GID=1000",
+    "SUDO_HOME=/home/managed",
+    "SUDO_TTY=/dev/pts/1"
+  ]
+}

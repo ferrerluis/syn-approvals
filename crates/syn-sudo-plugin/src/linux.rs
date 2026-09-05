@@ -404,11 +404,13 @@ fn validate_final_environment(
     environment: &[Vec<u8>],
 ) -> Result<(), &'static str> {
     let uid = parse_u32(required(command_info, "runas_uid")?, "runas_uid")?;
-    let account = run_as_environment_account(uid)?;
+    let account = environment_account(uid)?;
+    let invoking_account = environment_account(state.invoking_uid)?;
     let identity = crate::environment::Identity {
         invoking_uid: state.invoking_uid,
         invoking_gid: state.invoking_gid,
         invoking_user: &state.invoking_user,
+        invoking_home: &invoking_account.home,
         run_as_user: &account.name,
         home: &account.home,
         shell: &account.shell,
@@ -423,7 +425,7 @@ struct EnvironmentAccount {
     shell: Vec<u8>,
 }
 
-fn run_as_environment_account(uid: u32) -> Result<EnvironmentAccount, &'static str> {
+fn environment_account(uid: u32) -> Result<EnvironmentAccount, &'static str> {
     let mut storage = vec![0_u8; 65_536];
     let mut account = std::mem::MaybeUninit::<libc::passwd>::uninit();
     let mut result = std::ptr::null_mut();
@@ -439,7 +441,7 @@ fn run_as_environment_account(uid: u32) -> Result<EnvironmentAccount, &'static s
         )
     };
     if code != 0 || result.is_null() {
-        return Err("Syn cannot verify the target account's environment defaults.");
+        return Err("Syn cannot verify account environment defaults.");
     }
     // SAFETY: success with a non-null result initialized the passwd structure.
     let account = unsafe { account.assume_init() };
@@ -448,7 +450,7 @@ fn run_as_environment_account(uid: u32) -> Result<EnvironmentAccount, &'static s
         || account.pw_dir.is_null()
         || account.pw_shell.is_null()
     {
-        return Err("Syn cannot verify the target account's environment defaults.");
+        return Err("Syn cannot verify account environment defaults.");
     }
     // SAFETY: NSS supplies NUL-terminated strings in storage. Copy the three
     // public account fields before releasing it; do not read password material.
@@ -1019,7 +1021,7 @@ mod tests {
 
     #[test]
     fn target_environment_defaults_use_real_nss_without_authentication() {
-        let account = run_as_environment_account(0).unwrap();
+        let account = environment_account(0).unwrap();
         assert!(!account.name.is_empty());
         assert!(account.home.starts_with(b"/"));
         assert!(account.shell.starts_with(b"/"));
@@ -1027,11 +1029,13 @@ mod tests {
             invoking_uid: 1000,
             invoking_gid: 1000,
             invoking_user: "managed",
+            invoking_home: b"/home/managed",
             run_as_user: &account.name,
             home: &account.home,
             shell: &account.shell,
         };
         let mut environment = vec![format!("PATH={}", syn_config::SUDO_SECURE_PATH).into_bytes()];
+        environment.push(b"SUDO_HOME=/home/managed".to_vec());
         for (name, value) in [
             (b"HOME=".as_slice(), &account.home),
             (b"SHELL=".as_slice(), &account.shell),

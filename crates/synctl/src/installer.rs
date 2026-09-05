@@ -399,9 +399,12 @@ fn managed_rule(user: &str) -> String {
     format!(
         "# Managed by Syn. Remove this before disabling syn_approval.\n\
 Defaults:{user} env_reset, !setenv, secure_path=\"{}\"\n\
-Defaults:{user} env_keep += \"DEBIAN_FRONTEND DEBIAN_PRIORITY NEEDRESTART_MODE\"\n\
+Defaults:{user} env_keep = \"{}\"\n\
+Defaults:{user} env_check = \"{}\"\n\
 {user} ALL=(ALL:ALL) NOPASSWD: NOSETENV: ALL\n",
-        syn_config::SUDO_SECURE_PATH
+        syn_config::SUDO_SECURE_PATH,
+        syn_config::SUDO_ENV_KEEP,
+        syn_config::SUDO_ENV_CHECK,
     )
 }
 
@@ -724,6 +727,8 @@ mod tests {
             format!("{rule}ALL ALL=(ALL) NOPASSWD: ALL\n"),
             rule.replace("NOSETENV: ", ""),
             rule.replace("!setenv", "setenv"),
+            rule.replace("env_keep =", "env_keep +="),
+            rule.replace("env_check =", "env_check +="),
             rule.replace(syn_config::SUDO_SECURE_PATH, "/home/managed/bin:/usr/bin"),
         ] {
             assert!(validate_coupling_contents(PLUGIN_LINE, &invalid, user).is_err());

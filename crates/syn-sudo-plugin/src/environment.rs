@@ -9,6 +9,7 @@ pub(crate) struct Identity<'a> {
     pub invoking_uid: u32,
     pub invoking_gid: u32,
     pub invoking_user: &'a str,
+    pub invoking_home: &'a [u8],
     pub run_as_user: &'a [u8],
     pub home: &'a [u8],
     pub shell: &'a [u8],
@@ -38,6 +39,7 @@ pub(crate) fn validate(entries: &[Vec<u8>], identity: &Identity<'_>) -> Result<(
             b"SUDO_USER" => value == identity.invoking_user.as_bytes(),
             b"SUDO_UID" => value == identity.invoking_uid.to_string().as_bytes(),
             b"SUDO_GID" => value == identity.invoking_gid.to_string().as_bytes(),
+            b"SUDO_HOME" => value == identity.invoking_home,
             // Sudo-generated informational fields, not execution configuration.
             b"SUDO_COMMAND" | b"SUDO_TTY" => true,
             b"TERM" | b"COLORTERM" | b"LANG" | b"LANGUAGE" | b"LC_ALL" | b"LC_CTYPE"
@@ -126,6 +128,7 @@ mod tests {
             invoking_uid: 1000,
             invoking_gid: 1000,
             invoking_user: "managed",
+            invoking_home: b"/home/managed",
             run_as_user: b"root",
             home: b"/root",
             shell: b"/bin/bash",
@@ -143,6 +146,8 @@ mod tests {
             "SUDO_UID=1000".into(),
             "SUDO_GID=1000".into(),
             "SUDO_USER=managed".into(),
+            "SUDO_HOME=/home/managed".into(),
+            "SUDO_TTY=/dev/pts/1".into(),
             "SUDO_COMMAND=/usr/bin/apt install gh".into(),
             "MAIL=/var/mail/root".into(),
         ]
@@ -166,6 +171,60 @@ mod tests {
             let original = environment.clone();
             assert!(validate(&environment, &identity()).is_ok());
             assert_eq!(environment, original);
+        }
+    }
+    #[test]
+    fn sudo_1_9_17p2_generated_fields_and_managed_inheritance_are_compatible() {
+        // Source-derived fixture, not a replacement for guarded live sudo
+        // acceptance. In particular, sudo generates SUDO_HOME from the invoking
+        // account, while HOME belongs to the run-as account.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/sudo-environment-1.9.17p2.json"
+        ))
+        .unwrap();
+        let retained = fixture["inherited_retained"].as_array().unwrap();
+        let discarded = fixture["inherited_discarded"].as_array().unwrap();
+        let policy_names: HashSet<_> = syn_config::SUDO_ENV_KEEP
+            .split_whitespace()
+            .chain(syn_config::SUDO_ENV_CHECK.split_whitespace())
+            .collect();
+        for (entries, expected) in [(retained, true), (discarded, false)] {
+            for entry in entries {
+                let name = entry.as_str().unwrap().split_once('=').unwrap().0;
+                assert_eq!(policy_names.contains(name), expected);
+            }
+        }
+        let environment: Vec<_> = fixture["sudo_generated"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(retained)
+            .map(|entry| entry.as_str().unwrap().as_bytes().to_vec())
+            .collect();
+        assert!(validate(&environment, &identity()).is_ok());
+        // Even if another root-owned sudo/PAM setting reintroduces an excluded
+        // value, the trusted final check must not silently approve it.
+        for entry in discarded {
+            let mut hostile = environment.clone();
+            hostile.push(entry.as_str().unwrap().as_bytes().to_vec());
+            assert!(validate(&hostile, &identity()).is_err());
+        }
+        // Every inherited name intentionally named by sudoers is understood by
+        // the final validator; no wildcard may silently widen the policy.
+        for name in policy_names {
+            let value = match name {
+                "DISPLAY" => ":10.0",
+                "XAUTHORITY" => "/home/managed/.Xauthority",
+                "DEBIAN_FRONTEND" => "noninteractive",
+                "DEBIAN_PRIORITY" => "critical",
+                "NEEDRESTART_MODE" => "a",
+                _ => "C",
+            };
+            let minimal = vec![
+                format!("PATH={}", syn_config::SUDO_SECURE_PATH).into_bytes(),
+                format!("{name}={value}").into_bytes(),
+            ];
+            assert!(validate(&minimal, &identity()).is_ok());
         }
     }
     #[test]
@@ -214,6 +273,8 @@ mod tests {
             "SUDO_UID=0",
             "SUDO_GID=0",
             "SUDO_USER=root",
+            "SUDO_HOME=/root",
+            "SUDO_HOME=/tmp/unreviewed",
             "MAIL=/tmp/config",
             "DEBIAN_FRONTEND=../../unreviewed",
             "DEBIAN_PRIORITY=code",
