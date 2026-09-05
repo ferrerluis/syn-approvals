@@ -13,6 +13,9 @@ pub const DEFAULT_PAIRING_STATE: &str = "/var/lib/syn/pairing.json";
 pub const DEFAULT_SOCKET_PATH: &str = "/run/syn/agent.sock";
 pub const DEFAULT_LISTEN_PORT: u16 = 41_781;
 pub const APPROVAL_TIMEOUT_SECONDS: u64 = 90;
+pub const INSTALL_STATE_SCHEMA_VERSION: u16 = 2;
+pub const SUDO_SECURE_PATH: &str =
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -320,6 +323,10 @@ pub struct StatOverrideRecord {
     pub previous_mode: u32,
     pub previous_owner: u32,
     pub previous_group: u32,
+    /// An existing protective administrator override is never owned by Syn.
+    /// Absent in legacy v1 state, whose recorded overrides were all Syn-owned.
+    #[serde(default)]
+    pub preserved_override: Option<String>,
 }
 
 pub fn load_toml<T>(path: impl AsRef<Path>) -> Result<T, ConfigError>

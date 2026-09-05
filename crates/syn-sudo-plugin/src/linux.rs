@@ -249,6 +249,9 @@ unsafe extern "C" fn plugin_check(
             return Ok(0);
         }
 
+        // Environment policy failures are final, before signing, notification,
+        // transport or PAM. Never rewrite sudo's already-normalized environment.
+        validate_final_environment(&state, &command_info_map, &environment)?;
         let intent = build_intent(&state, &command_info_map, argv, environment)?;
         let target_key = read_signing_key(&config.target_private_key)?;
         let request =
@@ -392,6 +395,69 @@ fn build_intent(
         policy_version: 1,
         sudo_provider: "sudo.ws".into(),
         risk_markers,
+    })
+}
+
+fn validate_final_environment(
+    state: &PluginState,
+    command_info: &BTreeMap<String, Vec<u8>>,
+    environment: &[Vec<u8>],
+) -> Result<(), &'static str> {
+    let uid = parse_u32(required(command_info, "runas_uid")?, "runas_uid")?;
+    let account = run_as_environment_account(uid)?;
+    let identity = crate::environment::Identity {
+        invoking_uid: state.invoking_uid,
+        invoking_gid: state.invoking_gid,
+        invoking_user: &state.invoking_user,
+        run_as_user: &account.name,
+        home: &account.home,
+        shell: &account.shell,
+    };
+    crate::environment::validate(environment, &identity)?;
+    crate::environment::validate_search_directories()
+}
+
+struct EnvironmentAccount {
+    name: Vec<u8>,
+    home: Vec<u8>,
+    shell: Vec<u8>,
+}
+
+fn run_as_environment_account(uid: u32) -> Result<EnvironmentAccount, &'static str> {
+    let mut storage = vec![0_u8; 65_536];
+    let mut account = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    // SAFETY: all output pointers refer to writable, correctly sized storage;
+    // the reentrant NSS call owns no data beyond this local buffer's lifetime.
+    let code = unsafe {
+        libc::getpwuid_r(
+            uid,
+            account.as_mut_ptr(),
+            storage.as_mut_ptr().cast(),
+            storage.len(),
+            &mut result,
+        )
+    };
+    if code != 0 || result.is_null() {
+        return Err("Syn cannot verify the target account's environment defaults.");
+    }
+    // SAFETY: success with a non-null result initialized the passwd structure.
+    let account = unsafe { account.assume_init() };
+    if account.pw_uid != uid
+        || account.pw_name.is_null()
+        || account.pw_dir.is_null()
+        || account.pw_shell.is_null()
+    {
+        return Err("Syn cannot verify the target account's environment defaults.");
+    }
+    // SAFETY: NSS supplies NUL-terminated strings in storage. Copy the three
+    // public account fields before releasing it; do not read password material.
+    Ok(unsafe {
+        EnvironmentAccount {
+            name: CStr::from_ptr(account.pw_name).to_bytes().to_vec(),
+            home: CStr::from_ptr(account.pw_dir).to_bytes().to_vec(),
+            shell: CStr::from_ptr(account.pw_shell).to_bytes().to_vec(),
+        }
     })
 }
 
@@ -950,6 +1016,41 @@ unsafe fn free_pam_responses(responses: *mut PamResponse, initialized: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_environment_defaults_use_real_nss_without_authentication() {
+        let account = run_as_environment_account(0).unwrap();
+        assert!(!account.name.is_empty());
+        assert!(account.home.starts_with(b"/"));
+        assert!(account.shell.starts_with(b"/"));
+        let identity = crate::environment::Identity {
+            invoking_uid: 1000,
+            invoking_gid: 1000,
+            invoking_user: "managed",
+            run_as_user: &account.name,
+            home: &account.home,
+            shell: &account.shell,
+        };
+        let mut environment = vec![format!("PATH={}", syn_config::SUDO_SECURE_PATH).into_bytes()];
+        for (name, value) in [
+            (b"HOME=".as_slice(), &account.home),
+            (b"SHELL=".as_slice(), &account.shell),
+            (b"USER=".as_slice(), &account.name),
+        ] {
+            let mut entry = name.to_vec();
+            entry.extend(value);
+            environment.push(entry);
+        }
+        assert!(crate::environment::validate(&environment, &identity).is_ok());
+        environment.push(b"LD_PRELOAD=synthetic-blocked-hook".to_vec());
+        assert!(crate::environment::validate(&environment, &identity).is_err());
+    }
+
+    #[test]
+    #[ignore = "read-only search-path ownership check for the supported Ubuntu validation target"]
+    fn live_secure_search_path_read_only() {
+        crate::environment::validate_search_directories().unwrap();
+    }
 
     #[test]
     fn duplicate_fields_fail() {
