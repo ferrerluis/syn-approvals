@@ -5,10 +5,19 @@ import Foundation
 
 @main
 enum BrandingPackageProbe {
-  @MainActor static func main() throws {
+  static func fail(_ message: String) -> Never {
+    FileHandle.standardError.write(Data("Branding verification failed: \(message)\n".utf8))
+    exit(EXIT_FAILURE)
+  }
+
+  @MainActor static func main() {
+    do { try verify() } catch { fail(String(describing: error)) }
+  }
+
+  @MainActor static func verify() throws {
     let app = Bundle.main.bundleURL
     guard app.pathExtension == "app" else {
-      fatalError("Probe must run inside a relocated app bundle")
+      fail("Probe must run inside a relocated app bundle")
     }
     let resources = app.appendingPathComponent("Contents/Resources")
     let bundleURL = resources.appendingPathComponent("Syn_Syn.bundle")
@@ -19,21 +28,21 @@ enum BrandingPackageProbe {
         guard
           SynBranding.resourceURL(path.deletingPathExtension, extension: path.pathExtension) == nil
         else {
-          fatalError("Missing packaged artwork must not fall back to build-tree resources")
+          fail("Missing packaged artwork must not fall back to build-tree resources")
         }
       }
       guard SynBranding.colorLogo.isValid, SynBranding.blackLogo.isValid,
         SynBranding.idleMenuIcon.isTemplate, SynBranding.pendingMenuIcon.isTemplate
       else {
-        fatalError("Missing artwork did not safely fall back")
+        fail("Missing artwork did not safely fall back")
       }
       print("Missing artwork verified: no trap or build-tree fallback.")
       return
     }
-    guard CommandLine.arguments.count == 1 else { fatalError("Unexpected probe arguments") }
+    guard CommandLine.arguments.count == 1 else { fail("Unexpected probe arguments") }
     guard Set(try FileManager.default.contentsOfDirectory(atPath: bundleURL.path)) == expected
     else {
-      fatalError("Missing or unexpected packaged branding resources")
+      fail("Missing or unexpected packaged branding resources")
     }
     for name in expected {
       let path = name as NSString
@@ -43,7 +52,7 @@ enum BrandingPackageProbe {
         url.standardizedFileURL == bundleURL.appendingPathComponent(name).standardizedFileURL,
         let image = NSImage(contentsOf: url), image.isValid
       else {
-        fatalError("Packaged branding resource cannot be decoded")
+        fail("Packaged branding resource cannot be decoded")
       }
     }
     let info =
@@ -53,11 +62,20 @@ enum BrandingPackageProbe {
     guard info?["CFBundleIconFile"] as? String == "Syn",
       let icon = NSImage(contentsOf: resources.appendingPathComponent("Syn.icns")), icon.isValid
     else {
-      fatalError("Packaged app icon is missing or not registered")
+      fail("Packaged app icon is missing or not registered")
     }
     let sizes = Set(icon.representations.map(\.pixelsWide))
     guard Set([16, 32, 64, 128, 256, 512, 1024]).isSubset(of: sizes) else {
-      fatalError("Packaged app icon is missing native pixel sizes")
+      fail("Packaged app icon is missing native pixel sizes")
+    }
+    SynAppDelegate().applicationDidFinishLaunching(
+      Notification(name: NSApplication.didFinishLaunchingNotification)
+    )
+    guard let installed = NSApplication.shared.applicationIconImage,
+      installed.isValid, !installed.isTemplate,
+      matchingIconPixels(installed, icon)
+    else {
+      fail("Launch delegate did not install the packaged color Dock icon")
     }
     print("Branding package verified: two artwork resources and native 16–1024px app icons.")
   }

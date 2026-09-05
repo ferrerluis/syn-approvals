@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct SynApp: App {
+    @NSApplicationDelegateAdaptor(SynAppDelegate.self) private var appDelegate
     @StateObject private var model = SynModel()
 
     var body: some Scene {

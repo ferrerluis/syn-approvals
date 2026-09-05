@@ -3,12 +3,25 @@ import SwiftUI
 
 /// Local, bundled artwork only. Never load an image supplied by a target.
 @MainActor enum SynBranding {
-    // AppKit misrenders the color SVG's embedded texture. The supplied 423px
+    // AppKit misrenders the color SVG's embedded texture. The supplied 411px
     // PNG preserves it faithfully and exceeds the UI's 36pt @2x requirement.
     static let colorLogo = load("syn-logo-color", extension: "png")
     static let blackLogo = load("syn-logo-black", extension: "svg")
     static let idleMenuIcon = makeMenuIcon(hasPending: false)
     static let pendingMenuIcon = makeMenuIcon(hasPending: true)
+    static let applicationIcon: NSImage = {
+        if let url = Bundle.main.url(forResource: "Syn", withExtension: "icns"),
+           let image = NSImage(contentsOf: url), image.isValid {
+            return image
+        }
+        return colorLogo
+    }()
+
+    static func installApplicationIcon() {
+        // Explicitly set the running Dock tile, even when Launch Services has
+        // retained a generic icon from an earlier in-place installation.
+        NSApplication.shared.applicationIconImage = applicationIcon
+    }
 
     static func resourceURL(_ name: String, extension fileExtension: String) -> URL? {
         if Bundle.main.bundleURL.pathExtension == "app" {
@@ -47,6 +60,12 @@ import SwiftUI
         image.isTemplate = true
         image.accessibilityDescription = hasPending ? "Syn, approval pending" : "Syn"
         return image
+    }
+}
+
+@MainActor final class SynAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        SynBranding.installApplicationIcon()
     }
 }
 
