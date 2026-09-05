@@ -20,7 +20,7 @@ install -d "$resource_dir"
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-logo-color.png" "$resource_dir/"
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-logo-black.svg" "$resource_dir/"
 
-# AppKit misrenders the SVG texture. Downsample the supplied 1691px color PNG.
+# AppKit misrenders the SVG texture. Downsample the supplied 1643px color PNG.
 icon_work_dir=$(mktemp -d "${TMPDIR:-/tmp}/syn-icon.XXXXXX")
 swift "$repo_dir/scripts/build-branding.swift" \
     "$repo_dir/assets/branding/color/syn-logo-color@4x.png" "$icon_work_dir/Syn.iconset"
@@ -42,6 +42,7 @@ ditto "$app_dir/Contents/Resources" "$probe_app/Contents/Resources"
 swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
     -target "$(uname -m)-apple-macosx15.0" \
     "$repo_dir/macos/Sources/Syn/Branding.swift" \
+    "$repo_dir/macos/Tests/SynTests/IconComparison.swift" \
     "$build_dir/release/Syn.build/DerivedSources/resource_bundle_accessor.swift" \
     "$repo_dir/scripts/verify-branding-package.swift" \
     -o "$probe_app/Contents/MacOS/Syn"

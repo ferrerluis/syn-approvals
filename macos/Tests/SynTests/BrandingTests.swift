@@ -25,6 +25,24 @@ import Testing
     #expect(SynBranding.pendingMenuIcon.accessibilityDescription?.contains("pending") == true)
 }
 
+@MainActor @Test func launchDelegateInstallsColorDockIcon() throws {
+    let app = NSApplication.shared
+    let previous = app.applicationIconImage
+    defer { app.applicationIconImage = previous }
+    SynAppDelegate().applicationDidFinishLaunching(
+        Notification(name: NSApplication.didFinishLaunchingNotification)
+    )
+    let installed = try #require(app.applicationIconImage)
+    #expect(installed.isValid)
+    #expect(!installed.isTemplate)
+    #expect(matchingIconPixels(installed, SynBranding.applicationIcon))
+    // A generic placeholder, blank icon, or monochrome mark must not pass.
+    #expect(!matchingIconPixels(NSImage(size: NSSize(width: 64, height: 64)), SynBranding.applicationIcon))
+    #expect(!matchingIconPixels(SynBranding.blackLogo, SynBranding.applicationIcon))
+    let placeholder = try #require(NSImage(systemSymbolName: "app", accessibilityDescription: nil))
+    #expect(!matchingIconPixels(placeholder, SynBranding.applicationIcon))
+}
+
 @MainActor @Test func logosRenderWithTransparencyAndColor() throws {
     for (image, expectColor) in [(SynBranding.colorLogo, true), (SynBranding.blackLogo, false)] {
         let renderer = ImageRenderer(content: Image(nsImage: image).resizable().frame(width: 64, height: 64))
