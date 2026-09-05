@@ -11,6 +11,7 @@ let package = Package(
         .executableTarget(
             name: "Syn",
             path: "Sources/Syn",
+            resources: [.copy("Resources/Branding/syn-logo-color.png"), .copy("Resources/Branding/syn-logo-black.svg")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
