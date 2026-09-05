@@ -11,7 +11,18 @@ import SwiftUI
     static let pendingMenuIcon = makeMenuIcon(hasPending: true)
 
     static func resourceURL(_ name: String, extension fileExtension: String) -> URL? {
-        Bundle.module.url(forResource: name, withExtension: fileExtension)
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            // SwiftPM's accessor looks beside Contents, then in the build tree,
+            // and traps if neither exists. Installed apps must use only their
+            // own resources, returning nil so missing artwork can fall back.
+            guard let resources = Bundle.main.resourceURL,
+                  let bundle = Bundle(url: resources.appendingPathComponent("Syn_Syn.bundle")) else {
+                return nil
+            }
+            return bundle.url(forResource: name, withExtension: fileExtension)
+        }
+        // swift run / swift test use SwiftPM's unbundled executable layout.
+        return Bundle.module.url(forResource: name, withExtension: fileExtension)
     }
 
     private static func load(_ name: String, extension fileExtension: String) -> NSImage {

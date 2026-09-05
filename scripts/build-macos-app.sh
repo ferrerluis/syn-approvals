@@ -32,5 +32,22 @@ else
     codesign --force --sign - "$app_dir"
 fi
 codesign --verify --strict --verbose=2 "$app_dir"
-swift "$repo_dir/scripts/verify-branding-package.swift" "$app_dir"
+# Exercise the real lookup from an independent app layout, not a standalone
+# script that bypasses SynBranding. Link only branding code, never app services.
+probe_work_dir=$(mktemp -d "${TMPDIR:-/tmp}/syn-branding-probe.XXXXXX")
+probe_app="$probe_work_dir/Relocated/Syn.app"
+install -d "$probe_app/Contents/MacOS"
+cp "$app_dir/Contents/Info.plist" "$probe_app/Contents/Info.plist"
+ditto "$app_dir/Contents/Resources" "$probe_app/Contents/Resources"
+swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
+    -target "$(uname -m)-apple-macosx15.0" \
+    "$repo_dir/macos/Sources/Syn/Branding.swift" \
+    "$build_dir/release/Syn.build/DerivedSources/resource_bundle_accessor.swift" \
+    "$repo_dir/scripts/verify-branding-package.swift" \
+    -o "$probe_app/Contents/MacOS/Syn"
+"$probe_app/Contents/MacOS/Syn"
+# Leave the actual build-tree resources available: an accidental fallback to
+# them must still fail this negative test instead of masking missing artwork.
+mv "$probe_app/Contents/Resources/Syn_Syn.bundle" "$probe_work_dir/hidden-artwork.bundle"
+"$probe_app/Contents/MacOS/Syn" --expect-missing
 printf '%s\n' "$app_dir"

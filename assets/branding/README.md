@@ -26,4 +26,6 @@ The color SVG remains preferred for browser/documentation use. Native AppKit ren
 
 `scripts/build-macos-app.sh` packages the resource bundle and uses `scripts/build-branding.swift` plus Apple's `iconutil` to render the app icon at every required resolution from the 1691px color PNG. No raster is upscaled. No network access, authentication, private key or installed-app replacement is involved in asset generation.
 
+The package smoke test compiles the actual `SynBranding` code into a relocated probe app, without linking Syn's model or services. It verifies that lookup returns the packaged artwork, then hides that artwork and checks the safe symbol fallback. Build-tree resources remain present to catch accidental dependencies on SwiftPM's absolute fallback path.
+
 PARA stores the original files and durable brand guidance under the Syn project's `branding` collection. Source code and generated app bundles remain in the repository/build workspace, not in PARA.
