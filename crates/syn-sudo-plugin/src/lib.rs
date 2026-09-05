@@ -6,6 +6,9 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(any(target_os = "linux", test))]
+mod environment;
+
 #[cfg(target_os = "linux")]
 mod cancellation;
 

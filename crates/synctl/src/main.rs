@@ -1,5 +1,6 @@
 mod installer;
 mod preflight;
+mod providers;
 mod recovery_timer;
 
 use std::fs;

@@ -7,8 +7,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use syn_config::{InstallState, PluginConfig, Policy, StatOverrideRecord};
 
-use crate::recovery_timer;
 use crate::{atomic_write, require_root};
+use crate::{providers, recovery_timer};
 
 const SUDO_CONF: &str = "/etc/sudo.conf";
 const SUDOERS_RULE: &str = "/etc/sudoers.d/90-syn-managed-user";
@@ -200,44 +200,13 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
         std::process::id()
     ));
 
-    let providers = command_stdout("update-alternatives", &["--list", "sudo"])?;
-    let mut stat_overrides = Vec::new();
-    for provider in providers
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        let canonical = fs::canonicalize(provider).unwrap_or_else(|_| PathBuf::from(provider));
-        if canonical == Path::new("/usr/bin/sudo.ws") || provider == "/usr/bin/sudo.ws" {
-            continue;
-        }
-        let metadata = fs::metadata(&canonical)
-            .with_context(|| format!("inspect alternate provider {}", canonical.display()))?;
-        if metadata.mode() & 0o4000 == 0 {
-            continue;
-        }
-        let existing = Command::new("dpkg-statoverride")
-            .args(["--list", canonical.to_string_lossy().as_ref()])
-            .output()?;
-        if existing.status.success() && !existing.stdout.is_empty() {
-            bail!(
-                "alternate provider {} already has an administrator stat override",
-                canonical.display()
-            );
-        }
-        stat_overrides.push(StatOverrideRecord {
-            path: canonical,
-            previous_mode: metadata.mode() & 0o7777,
-            previous_owner: metadata.uid(),
-            previous_group: metadata.gid(),
-        });
-    }
+    let stat_overrides = providers::prepare()?;
 
     // Retain each backup independently so recovery does not prevent a later
     // guarded reinstall, and never truncate a previous recovery copy.
     write_new_backup(&backup, &fs::read(SUDO_CONF)?)?;
     let mut state = InstallState {
-        schema_version: 1,
+        schema_version: syn_config::INSTALL_STATE_SCHEMA_VERSION,
         phase: "prepared".into(),
         managed_user: plan.managed_user.clone(),
         managed_uid,
@@ -252,16 +221,7 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
     write_state(state_path, &state)?;
 
     let result = (|| -> Result<()> {
-        for record in &stat_overrides {
-            let path = record.path.to_string_lossy();
-            run("dpkg-statoverride", &disable_provider_arguments(&path))?;
-            if fs::metadata(&record.path)?.mode() & 0o4000 != 0 {
-                bail!(
-                    "setuid override did not take effect for {}",
-                    record.path.display()
-                );
-            }
-        }
+        providers::protect(&stat_overrides)?;
         state.phase = "alternate_providers_disabled".into();
         write_state(state_path, &state)?;
 
@@ -299,7 +259,10 @@ pub fn apply(plan: InstallPlan, state_path: &Path) -> Result<()> {
             "/usr/sbin/visudo.ws",
             &["-cf", temporary_rule.to_string_lossy().as_ref()],
         )?;
+        // Re-enumerate immediately before the passwordless rule becomes active.
+        providers::verify(&stat_overrides)?;
         fs::rename(temporary_rule, SUDOERS_RULE)?;
+        fs::File::open("/etc/sudoers.d")?.sync_all()?;
         run("/usr/sbin/visudo.ws", &["-cf", "/etc/sudoers"])?;
         state.phase = "armed".into();
         write_state(state_path, &state)?;
@@ -320,7 +283,10 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
     let state: InstallState = serde_json::from_slice(
         &fs::read(state_path).with_context(|| format!("read {}", state_path.display()))?,
     )?;
-    if state.schema_version != 1 {
+    if !matches!(
+        state.schema_version,
+        1 | syn_config::INSTALL_STATE_SCHEMA_VERSION
+    ) {
         bail!("unsupported installation state schema");
     }
     if state.shadow_mode {
@@ -344,6 +310,7 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
     if Path::new(SUDOERS_RULE).exists() {
         fs::remove_file(SUDOERS_RULE)?;
     }
+    fs::File::open("/etc/sudoers.d")?.sync_all()?;
     if let Some(backup) = &state.sudo_conf_backup {
         validate_root_file(backup)?;
         atomic_write(
@@ -360,6 +327,10 @@ pub fn recover(state_path: &Path, apply: bool) -> Result<RecoveryResult> {
         }
     }
     for record in &state.stat_overrides {
+        if record.preserved_override.is_some() {
+            providers::verify_preserved(record)?;
+            continue;
+        }
         let path = record.path.to_string_lossy();
         let existing = Command::new("dpkg-statoverride")
             .args(["--list", path.as_ref()])
@@ -399,7 +370,10 @@ fn sudo_alternative_auto() -> Result<bool> {
 pub fn check_installed_coupling(state_path: &Path) -> Result<String> {
     validate_root_file(state_path)?;
     let state: InstallState = serde_json::from_slice(&fs::read(state_path)?)?;
-    if state.schema_version != 1 || state.shadow_mode || state.phase != "armed" {
+    if state.schema_version != syn_config::INSTALL_STATE_SCHEMA_VERSION
+        || state.shadow_mode
+        || state.phase != "armed"
+    {
         bail!("installation is not in the armed phase");
     }
     if lookup_uid(&state.managed_user) != Some(state.managed_uid) {
@@ -416,22 +390,22 @@ pub fn check_installed_coupling(state_path: &Path) -> Result<String> {
         &fs::read_to_string(SUDOERS_RULE)?,
         &state.managed_user,
     )?;
-    for record in &state.stat_overrides {
-        let path = record.path.to_string_lossy();
-        validate_syn_override(
-            &command_stdout("dpkg-statoverride", &["--list", &path])?,
-            &path,
-        )?;
-        if fs::metadata(&record.path)?.mode() & 0o4000 != 0 {
-            bail!("recorded alternate provider is still setuid");
-        }
-    }
+    providers::verify(&state.stat_overrides)?;
     run("systemctl", &["is-active", "--quiet", "syn-agent.service"])?;
     Ok(format!("armed for {} ({}); sudo.ws, global plug-in, exact one-user rule, persistent provider overrides, and active relay verified", state.managed_user, state.managed_uid))
 }
 
 fn managed_rule(user: &str) -> String {
-    format!("# Managed by Syn. Remove this before disabling syn_approval.\n{user} ALL=(ALL:ALL) NOPASSWD: ALL\n")
+    format!(
+        "# Managed by Syn. Remove this before disabling syn_approval.\n\
+Defaults:{user} env_reset, !setenv, secure_path=\"{}\"\n\
+Defaults:{user} env_keep = \"{}\"\n\
+Defaults:{user} env_check = \"{}\"\n\
+{user} ALL=(ALL:ALL) NOPASSWD: NOSETENV: ALL\n",
+        syn_config::SUDO_SECURE_PATH,
+        syn_config::SUDO_ENV_KEEP,
+        syn_config::SUDO_ENV_CHECK,
+    )
 }
 
 fn validate_coupling_contents(sudo_conf: &str, rule: &str, user: &str) -> Result<()> {
@@ -469,10 +443,6 @@ fn validate_root_file(path: &Path) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn disable_provider_arguments(path: &str) -> [&str; 6] {
-    ["--update", "--add", "root", "root", "0755", path]
 }
 
 fn validate_syn_override(output: &str, path: &str) -> Result<()> {
@@ -556,7 +526,7 @@ fn apply_shadow(plan: &InstallPlan, state_path: &Path, managed_uid: u32) -> Resu
     // create_new refuses collisions and symlinks; retain this backup after recovery.
     write_new_backup(&backup, &original)?;
     let mut state = InstallState {
-        schema_version: 1,
+        schema_version: syn_config::INSTALL_STATE_SCHEMA_VERSION,
         phase: "shadow_prepared".into(),
         managed_user: plan.managed_user.clone(),
         managed_uid,
@@ -616,6 +586,7 @@ fn recover_shadow(state_path: &Path, state: &InstallState, apply: bool) -> Resul
     if Path::new(SUDOERS_RULE).exists() {
         fs::remove_file(SUDOERS_RULE)?;
     }
+    fs::File::open("/etc/sudoers.d")?.sync_all()?;
     let backup = state
         .sudo_conf_backup
         .as_ref()
@@ -724,10 +695,6 @@ mod tests {
     #[test]
     fn override_updates_live_permissions_and_only_our_override_can_be_removed() {
         let path = "/usr/lib/cargo/bin/sudo";
-        assert_eq!(
-            disable_provider_arguments(path),
-            ["--update", "--add", "root", "root", "0755", path]
-        );
         assert!(validate_syn_override(&format!("root root 755 {path}\n"), path).is_ok());
         assert!(validate_syn_override(&format!("root root 0755 {path}\n"), path).is_ok());
         for invalid in [
@@ -758,9 +725,29 @@ mod tests {
             String::new(),
             managed_rule("someone_else"),
             format!("{rule}ALL ALL=(ALL) NOPASSWD: ALL\n"),
+            rule.replace("NOSETENV: ", ""),
+            rule.replace("!setenv", "setenv"),
+            rule.replace("env_keep =", "env_keep +="),
+            rule.replace("env_check =", "env_check +="),
+            rule.replace(syn_config::SUDO_SECURE_PATH, "/home/managed/bin:/usr/bin"),
         ] {
             assert!(validate_coupling_contents(PLUGIN_LINE, &invalid, user).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hardened_managed_rule_passes_real_visudo_without_changing_system_policy() {
+        let directory = TestDirectory::new("sudoers-syntax");
+        let path = directory.0.join("fixture-sudoers");
+        fs::write(&path, managed_rule("managed")).unwrap();
+        let visudo = if Path::new("/usr/sbin/visudo.ws").is_file() {
+            "/usr/sbin/visudo.ws"
+        } else {
+            "/usr/sbin/visudo"
+        };
+        let result = Command::new(visudo).arg("-cf").arg(&path).output().unwrap();
+        assert!(result.status.success(), "sudoers syntax validation failed");
     }
 
     #[test]
@@ -774,6 +761,7 @@ mod tests {
             previous_mode: 0o4755,
             previous_owner: metadata.uid(),
             previous_group: metadata.gid(),
+            preserved_override: None,
         };
         restore_provider_metadata(&record).unwrap();
         let restored = fs::metadata(&path).unwrap();
