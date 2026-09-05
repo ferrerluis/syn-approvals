@@ -25,6 +25,7 @@ struct SynMenuView: View {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
         }
+        Button("About Syn") { NSApp.orderFrontStandardAboutPanel(nil) }
         Button("Quit Syn") { NSApp.terminate(nil) }
     }
 }
@@ -35,25 +36,28 @@ struct SynContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(selection: $model.selectedRequestID) {
-                Section("Pending") {
-                    ForEach(model.pending) { request in
-                        VStack(alignment: .leading) {
-                            Text(model.target(for: request)?.displayName ?? request.targetID)
-                            Text(SafeDisplay.render(request.executable)).font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                SynBrandHeader()
+                List(selection: $model.selectedRequestID) {
+                    Section("Pending") {
+                        ForEach(model.pending) { request in
+                            VStack(alignment: .leading) {
+                                Text(model.target(for: request)?.displayName ?? request.targetID)
+                                Text(SafeDisplay.render(request.executable)).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .tag(request.id)
                         }
-                        .tag(request.id)
                     }
-                }
-                Section("Targets") {
-                    ForEach(model.targets) { target in
-                        HStack {
-                            Circle()
-                                .fill(model.connectedTargets.contains(target.targetID) ? .green : .gray)
-                                .frame(width: 8, height: 8)
-                            Text(target.displayName)
-                            Text(model.connectedTargets.contains(target.targetID) ? "Connected" : (model.pausedConnections.contains(target.targetID) ? "Retry needed" : "Disconnected"))
-                                .font(.caption).foregroundStyle(.secondary)
+                    Section("Targets") {
+                        ForEach(model.targets) { target in
+                            HStack {
+                                Circle()
+                                    .fill(model.connectedTargets.contains(target.targetID) ? .green : .gray)
+                                    .frame(width: 8, height: 8)
+                                Text(target.displayName)
+                                Text(model.connectedTargets.contains(target.targetID) ? "Connected" : (model.pausedConnections.contains(target.targetID) ? "Retry needed" : "Disconnected"))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -88,7 +92,10 @@ private struct ApprovalDetailView: View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Approval requested").font(.largeTitle.bold())
+                    HStack(spacing: 12) {
+                        SynLogo(size: 36)
+                        Text("Approval requested").font(.largeTitle.bold())
+                    }
                     Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
                         row("Target", model.target(for: request)?.displayName ?? request.targetID)
                         row("Target ID", request.targetID)

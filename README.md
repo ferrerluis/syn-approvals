@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/branding/color/syn-logo-color.svg" width="112" height="112" alt="Syn logo"></p>
+
 # Syn
 
 Syn is a human-approval gate for privileged actions on remote development machines. The first adapter gates an ordinary, already-authorized `sudo.ws` invocation on Ubuntu and asks a paired Mac for a one-use signed decision.
@@ -29,6 +31,7 @@ The installer is intentionally **not automatically armed** by a package install.
 - `macos`: native SwiftUI approver.
 - `packaging`: Ubuntu service, PAM, policy, and package assets.
 - `docs`: design authority and recovery guidance.
+- `assets/branding`: original color and monochrome logos and [usage guidance](assets/branding/README.md).
 
 ## Developer setup
 

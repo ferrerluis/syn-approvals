@@ -39,6 +39,7 @@ private final class TestSigner: DecisionSigning, @unchecked Sendable {
     var cancellationCalls = 0
     var failApproval = false
     var approvalDelay: TimeInterval = 0
+    var approvalGate: DispatchSemaphore?
 
     func approvalPublicKey() throws -> Data {
         lock.withLock { approvalReads += 1 }
@@ -50,6 +51,9 @@ private final class TestSigner: DecisionSigning, @unchecked Sendable {
     func signApproval(payload: Data, reason: String, cancellation: ApprovalCancellation) throws -> (keyID: Data, signature: Data) {
         cancellation.install { self.lock.withLock { self.cancellationCalls += 1 } }
         lock.withLock { approvalSigns += 1 }
+        if let approvalGate, approvalGate.wait(timeout: .now() + 10) == .timedOut {
+            throw CancellationError()
+        }
         if approvalDelay > 0 { Thread.sleep(forTimeInterval: approvalDelay) }
         try cancellation.check()
         if failApproval { throw CancellationError() }
@@ -170,16 +174,26 @@ private func decisionAction(_ message: WireMessage, key: P256.Signing.PublicKey)
 
 @Test @MainActor func expiryInvalidatesAuthenticationBeforeItCompletes() async throws {
     let signer = TestSigner()
-    signer.approvalDelay = 0.3
+    let gate = DispatchSemaphore(value: 0)
+    signer.approvalGate = gate
+    defer { gate.signal() }
     var messages: [WireMessage] = []
     let model = SynModel(startServices: false, signer: signer) { message, _ in messages.append(message) }
-    let item = request(expiresIn: 0.05)
+    // Rendering tests also use the main actor. Give authentication time to
+    // actually start, then hold it open until expiry is explicitly observed.
+    // A 50ms request plus a fixed 100ms sleep could test pre-start rejection
+    // instead of canceling an in-flight authentication operation.
+    let item = request(expiresIn: 2)
     try model.enqueueVerified(item)
     let task = Task { await model.approve(item.id) }
-    try await Task.sleep(for: .milliseconds(100))
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while !signer.approvalStarted, ContinuousClock.now < deadline { await Task.yield() }
+    try #require(signer.approvalStarted)
+    try await Task.sleep(for: .seconds(max(0, item.expiresAt.timeIntervalSinceNow) + 0.02))
     model.pruneExpiredRequests()
     #expect(signer.cancellationCalls == 1)
     #expect(model.pending.isEmpty)
+    gate.signal()
     await task.value
     #expect(messages.isEmpty)
 }

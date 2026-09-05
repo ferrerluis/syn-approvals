@@ -11,8 +11,11 @@ struct SynApp: App {
         .defaultSize(width: 960, height: 680)
         .defaultLaunchBehavior(.presented)
 
-        MenuBarExtra("Syn", systemImage: model.pending.isEmpty ? "checkmark.shield" : "exclamationmark.shield") {
+        MenuBarExtra {
             SynMenuView(model: model)
+        } label: {
+            Image(nsImage: model.pending.isEmpty ? SynBranding.idleMenuIcon : SynBranding.pendingMenuIcon)
+                .accessibilityLabel(model.pending.isEmpty ? "Syn" : "Syn, \(model.pending.count) approvals pending")
         }
         .menuBarExtraStyle(.menu)
     }
