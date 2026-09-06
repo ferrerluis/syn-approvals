@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/branding/color/syn-logo-color.svg" width="112" height="112" alt="Syn logo"></p>
+<p align="center"><img src="assets/branding/light/syn-app-icon-light.png" width="112" height="112" alt="Syn logo"></p>
 
 # Syn
 
@@ -31,7 +31,7 @@ The installer is intentionally **not automatically armed** by a package install.
 - `macos`: native SwiftUI approver.
 - `packaging`: Ubuntu service, PAM, policy, and package assets.
 - `docs`: design authority and recovery guidance.
-- `assets/branding`: original color and monochrome logos and [usage guidance](assets/branding/README.md).
+- `assets/branding`: original light, dark and menu-bar artwork with [usage guidance](assets/branding/README.md).
 
 ## Developer setup
 
