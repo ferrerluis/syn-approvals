@@ -21,7 +21,7 @@ enum BrandingPackageProbe {
     }
     let resources = app.appendingPathComponent("Contents/Resources")
     let bundleURL = resources.appendingPathComponent("Syn_Syn.bundle")
-    let expected = Set(["syn-logo-color.png", "syn-logo-black.svg"])
+    let expected = Set(["syn-app-icon-light.png", "syn-app-icon-dark.png", "syn-menu-icon.svg"])
     if CommandLine.arguments.dropFirst() == ["--expect-missing"] {
       for name in expected {
         let path = name as NSString
@@ -31,7 +31,8 @@ enum BrandingPackageProbe {
           fail("Missing packaged artwork must not fall back to build-tree resources")
         }
       }
-      guard SynBranding.colorLogo.isValid, SynBranding.blackLogo.isValid,
+      guard SynBranding.lightLogo.isValid, SynBranding.darkLogo.isValid,
+        SynBranding.menuBarLogo.isValid,
         SynBranding.idleMenuIcon.isTemplate, SynBranding.pendingMenuIcon.isTemplate
       else {
         fail("Missing artwork did not safely fall back")
@@ -60,23 +61,37 @@ enum BrandingPackageProbe {
         from: Data(contentsOf: app.appendingPathComponent("Contents/Info.plist")), format: nil
       ) as? [String: Any]
     guard info?["CFBundleIconFile"] as? String == "Syn",
-      let icon = NSImage(contentsOf: resources.appendingPathComponent("Syn.icns")), icon.isValid
+      let lightIcon = NSImage(contentsOf: resources.appendingPathComponent("Syn.icns")),
+      lightIcon.isValid,
+      let darkIcon = NSImage(contentsOf: resources.appendingPathComponent("Syn-dark.icns")),
+      darkIcon.isValid
     else {
       fail("Packaged app icon is missing or not registered")
     }
-    let sizes = Set(icon.representations.map(\.pixelsWide))
-    guard Set([16, 32, 64, 128, 256, 512, 1024]).isSubset(of: sizes) else {
-      fail("Packaged app icon is missing native pixel sizes")
+    for icon in [lightIcon, darkIcon] {
+      let sizes = Set(icon.representations.map(\.pixelsWide))
+      guard Set([16, 32, 64, 128, 256, 512, 1024]).isSubset(of: sizes) else {
+        fail("Packaged app icon is missing native pixel sizes")
+      }
+    }
+    guard
+      let aqua = NSAppearance(named: .aqua),
+      let darkAqua = NSAppearance(named: .darkAqua),
+      matchingIconPixels(SynBranding.applicationIcon(for: aqua), lightIcon),
+      matchingIconPixels(SynBranding.applicationIcon(for: darkAqua), darkIcon),
+      !matchingIconPixels(lightIcon, darkIcon)
+    else {
+      fail("Light and dark app-icon variants are missing or incorrectly mapped")
     }
     SynAppDelegate().applicationDidFinishLaunching(
       Notification(name: NSApplication.didFinishLaunchingNotification)
     )
     guard let installed = NSApplication.shared.applicationIconImage,
       installed.isValid, !installed.isTemplate,
-      matchingIconPixels(installed, icon)
+      matchingIconPixels(installed, SynBranding.applicationIcon())
     else {
       fail("Launch delegate did not install the packaged color Dock icon")
     }
-    print("Branding package verified: two artwork resources and native 16–1024px app icons.")
+    print("Branding package verified: three artwork resources and light/dark 16–1024px app icons.")
   }
 }

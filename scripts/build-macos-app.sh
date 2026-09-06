@@ -17,14 +17,19 @@ install -m 0644 "$repo_dir/macos/Support/Info.plist" "$app_dir/Contents/Info.pli
 # only the declared artwork, never stale resources from an earlier build.
 resource_dir="$app_dir/Contents/Resources/Syn_Syn.bundle"
 install -d "$resource_dir"
-install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-logo-color.png" "$resource_dir/"
-install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-logo-black.svg" "$resource_dir/"
+install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-app-icon-light.png" "$resource_dir/"
+install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-app-icon-dark.png" "$resource_dir/"
+install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-menu-icon.svg" "$resource_dir/"
 
-# AppKit misrenders the SVG texture. Downsample the supplied 1643px color PNG.
+# Build independent light/dark ICNS files from the smallest exports that exceed
+# macOS's 1024px maximum. The app switches its running Dock icon by appearance.
 icon_work_dir=$(mktemp -d "${TMPDIR:-/tmp}/syn-icon.XXXXXX")
 swift "$repo_dir/scripts/build-branding.swift" \
-    "$repo_dir/assets/branding/color/syn-logo-color@4x.png" "$icon_work_dir/Syn.iconset"
+    "$repo_dir/assets/branding/light/syn-app-icon-light@2x.png" "$icon_work_dir/Syn.iconset"
 iconutil -c icns "$icon_work_dir/Syn.iconset" -o "$app_dir/Contents/Resources/Syn.icns"
+swift "$repo_dir/scripts/build-branding.swift" \
+    "$repo_dir/assets/branding/dark/syn-app-icon-dark@2x.png" "$icon_work_dir/Syn-dark.iconset"
+iconutil -c icns "$icon_work_dir/Syn-dark.iconset" -o "$app_dir/Contents/Resources/Syn-dark.icns"
 
 if [ -n "${SYN_CODESIGN_IDENTITY:-}" ]; then
     codesign --force --options runtime --timestamp --sign "$SYN_CODESIGN_IDENTITY" "$app_dir"

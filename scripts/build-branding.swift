@@ -3,12 +3,12 @@ import AppKit
 import Foundation
 
 guard CommandLine.arguments.count == 3 else {
-    fatalError("Usage: build-branding.swift COLOR_PNG OUTPUT.iconset")
+    fatalError("Usage: build-branding.swift APP_ICON_PNG OUTPUT.iconset")
 }
 let source = URL(fileURLWithPath: CommandLine.arguments[1])
 let destination = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
 guard let logo = NSImage(contentsOf: source), logo.isValid else {
-    fatalError("Cannot decode the color logo")
+    fatalError("Cannot decode the app icon")
 }
 guard logo.representations.contains(where: { $0.pixelsWide >= 1024 && $0.pixelsHigh >= 1024 }) else {
     fatalError("App icon source must have at least 1024 physical pixels per side")
@@ -30,9 +30,9 @@ for points in [16, 32, 128, 256, 512] {
         let canvas = NSRect(x: 0, y: 0, width: pixels, height: pixels)
         NSColor.clear.setFill()
         canvas.fill(using: .copy)
-        // Preserve the transparent circular artwork, with consistent Dock padding.
-        let inset = CGFloat(pixels) * 0.08
-        logo.draw(in: canvas.insetBy(dx: inset, dy: inset))
+        // The supplied rounded-square artwork already owns the full canvas.
+        // macOS supplies the external Dock shadow; don't bake in extra padding.
+        logo.draw(in: canvas)
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
         guard let png = bitmap.representation(using: .png, properties: [:]) else {
