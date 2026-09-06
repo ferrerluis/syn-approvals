@@ -7,6 +7,7 @@ guard CommandLine.arguments.count == 3 else {
 }
 let source = URL(fileURLWithPath: CommandLine.arguments[1])
 let destination = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+let dockArtInsetFraction: CGFloat = 0.08
 guard let logo = NSImage(contentsOf: source), logo.isValid else {
     fatalError("Cannot decode the app icon")
 }
@@ -30,9 +31,10 @@ for points in [16, 32, 128, 256, 512] {
         let canvas = NSRect(x: 0, y: 0, width: pixels, height: pixels)
         NSColor.clear.setFill()
         canvas.fill(using: .copy)
-        // The supplied rounded-square artwork already owns the full canvas.
-        // macOS supplies the external Dock shadow; don't bake in extra padding.
-        logo.draw(in: canvas)
+        // macOS supplies the external Dock shadow, but it does not normalize
+        // optical size. Keep the illustrated tile inside the standard canvas.
+        let inset = CGFloat(pixels) * dockArtInsetFraction
+        logo.draw(in: canvas.insetBy(dx: inset, dy: inset))
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
         guard let png = bitmap.representation(using: .png, properties: [:]) else {

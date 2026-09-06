@@ -73,6 +73,7 @@ enum BrandingPackageProbe {
       guard Set([16, 32, 64, 128, 256, 512, 1024]).isSubset(of: sizes) else {
         fail("Packaged app icon is missing native pixel sizes")
       }
+      verifyDockPadding(icon)
     }
     guard
       let aqua = NSAppearance(named: .aqua),
@@ -93,5 +94,30 @@ enum BrandingPackageProbe {
       fail("Launch delegate did not install the packaged color Dock icon")
     }
     print("Branding package verified: three artwork resources and light/dark 16–1024px app icons.")
+  }
+
+  @MainActor static func verifyDockPadding(_ icon: NSImage) {
+    let pixels = 1024
+    guard let bitmap = NSBitmapImageRep(
+      bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+      colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+      let context = NSGraphicsContext(bitmapImageRep: bitmap)
+    else { fail("Cannot render packaged app icon") }
+
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    let canvas = NSRect(x: 0, y: 0, width: pixels, height: pixels)
+    NSColor.clear.setFill()
+    canvas.fill(using: .copy)
+    icon.draw(in: canvas)
+    context.flushGraphics()
+    NSGraphicsContext.restoreGraphicsState()
+
+    let outer = [(32, 512), (991, 512), (512, 32), (512, 991)]
+    let inner = [(96, 512), (927, 512), (512, 96), (512, 927)]
+    guard outer.allSatisfy({ bitmap.colorAt(x: $0.0, y: $0.1)?.alphaComponent ?? 1 < 0.02 }),
+      inner.allSatisfy({ bitmap.colorAt(x: $0.0, y: $0.1)?.alphaComponent ?? 0 > 0.9 })
+    else { fail("Packaged app icon does not preserve standard Dock padding") }
   }
 }
