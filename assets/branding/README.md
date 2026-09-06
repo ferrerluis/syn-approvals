@@ -41,8 +41,8 @@ aspect-fits it rather than stretching it. Pending requests retain a separate dot
 and accessible label.
 
 `scripts/build-macos-app.sh` creates both ICNS files from the 2044px sources.
-It adds no outer shadow or extra inset: macOS owns the Dock shadow, while the
-rounded-square artwork already owns its full canvas.
+macOS owns the Dock shadow but doesn't normalize optical size, so the generated
+icons keep an 8% transparent inset around the supplied rounded-square artwork.
 
 The package smoke test compiles the real `SynBranding` code into a relocated
 probe app without linking the model, authentication or transport services. It
