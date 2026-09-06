@@ -7,7 +7,7 @@ These rules apply to the whole repository.
 - Preserve executable, argv, working directory, identities, and environment digest as typed fields. Raw command bytes must never be joined into a shell command.
 - The unprivileged agent may relay only target-signed requests and approver-signed decisions. It must never possess the target private authorization key or gain a command-execution API.
 - Approval is one request, one nonce, one target, and one live invocation. Do not add caches, grace periods, batch approval, patterns, or standing grants without a new threat model and explicit product decision.
-- Integrity failures, replays, unsupported schemas, malformed messages, local policy blocks, and explicit denials fail closed. Only ordinary unavailability or expiry may enter the documented interactive PAM fallback.
+- Integrity failures, replays, unsupported schemas, malformed messages, local policy blocks, and explicit denials fail closed. Ordinary unavailability/expiry, or an explicit Enter-to-password selection while an interactive request is still pending, may enter PAM. Cancel the pending request before that selection takes effect; completed hard denials cannot be reopened.
 - Keep passwords, environment values, private keys, pairing secrets, full argv, and TLS material out of Syn logs and test snapshots.
 - Any installer change must preserve the ordering invariant: remove `NOPASSWD` first during recovery and add it last during installation.
 - Never weaken or remove the alternate-provider setuid audit to make installation easier.
