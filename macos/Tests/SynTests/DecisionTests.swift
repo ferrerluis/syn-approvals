@@ -76,7 +76,9 @@ private func request(expiresIn: TimeInterval = 90, target: String = "test-target
         invokingUID: 1000, invokingUser: "test-user", runAsUID: 0, runAsUser: "root",
         runAsGroup: "root", workingDirectory: Data("/test".utf8), executable: Data("/usr/bin/true".utf8),
         arguments: [Data("unique-private-argument-marker".utf8)], environmentNames: ["TEST"],
-        environmentDigest: Data(repeating: 4, count: 32), riskMarkers: []
+        environmentDigest: Data(repeating: 4, count: 32), riskMarkers: [],
+        releaseID: ReleaseIdentity.current.releaseID,
+        releaseCommit: SynProtocol.developmentCommit
     )
 }
 
@@ -90,7 +92,11 @@ private func decisionAction(_ message: WireMessage, key: P256.Signing.PublicKey)
         try P256.Signing.ECDSASignature(rawRepresentation: signature),
         for: try SynProtocol.signatureStructure(protected: header, payload: payload)
     ))
-    return try CBORCodec.decodeCanonical(payload).integerKeyedMap()[4]?.unsignedValue
+    let decision = try CBORCodec.decodeCanonical(payload).integerKeyedMap()
+    #expect(decision.count == 10)
+    #expect(decision[8]?.textValue == ReleaseIdentity.current.releaseID)
+    #expect(decision[9]?.textValue == SynProtocol.developmentCommit)
+    return decision[4]?.unsignedValue
 }
 
 @Test @MainActor func denialNeverReadsApprovalKey() async throws {

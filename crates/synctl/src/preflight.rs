@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn requester_rejects_late_denied_modified_wrong_target_and_replayed_decisions() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
         let target = SigningKey::from_slice(&[1_u8; 32]).unwrap();
         let approval = SigningKey::from_slice(&[2_u8; 32]).unwrap();
         let denial = SigningKey::from_slice(&[3_u8; 32]).unwrap();
@@ -337,6 +337,18 @@ mod tests {
         next_invocation.request.request_id = vec![9; 16].into();
         next_invocation.payload_hash[0] ^= 1;
         assert!(evaluate(&signed, &next_invocation, deadline).is_err());
+    }
+
+    #[test]
+    fn prior_protocol_request_and_decision_are_rejected() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+        let target = SigningKey::from_slice(&[1_u8; 32]).unwrap();
+        let approval = SigningKey::from_slice(&[2_u8; 32]).unwrap();
+        let request = hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap();
+        let decision = hex::decode(fixture["signed_approval_hex"].as_str().unwrap()).unwrap();
+        assert!(verify_request(&request, target.verifying_key()).is_err());
+        assert!(verify_decision(&decision, approval.verifying_key()).is_err());
     }
 
     #[test]

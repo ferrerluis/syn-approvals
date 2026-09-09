@@ -6,7 +6,9 @@
 
 use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 pub(crate) const IO_SLICE: Duration = Duration::from_millis(100);
 const SIGNALS: [i32; 7] = [
@@ -38,6 +40,7 @@ pub(crate) fn check() -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn wait_until(deadline: Instant) {
     while check().is_ok() {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {

@@ -20,7 +20,7 @@ struct WireMessage: Sendable {
     init(data: Data) throws {
         guard data.count <= 65_536 else { throw SynProtocolError.invalid("message exceeds 64 KiB") }
         let map = try CBORCodec.decodeCanonical(data).integerKeyedMap()
-        guard map.count == 3, map[0]?.unsignedValue == 1,
+        guard map.count == 3, map[0]?.unsignedValue == SynProtocol.version,
               let rawKind = map[1]?.unsignedValue, let byteKind = UInt8(exactly: rawKind),
               let kind = SynMessageKind(rawValue: byteKind),
               let body = map[2]?.bytesValue else { throw SynProtocolError.invalid("invalid wire envelope") }
@@ -35,7 +35,7 @@ struct WireMessage: Sendable {
 
     func encoded() throws -> Data {
         let value: CBOR = .map([
-            (.unsigned(0), .unsigned(1)),
+            (.unsigned(0), .unsigned(SynProtocol.version)),
             (.unsigned(1), .unsigned(UInt64(kind.rawValue))),
             (.unsigned(2), .bytes(body)),
         ])
@@ -64,6 +64,8 @@ struct VerifiedApprovalRequest: Identifiable, Sendable {
     let environmentNames: [String]
     let environmentDigest: Data
     let riskMarkers: [String]
+    let releaseID: String
+    let releaseCommit: String
 
     // IDs used by UI, notifications, and in-memory routing include the pinned
     // target. A second target cannot collide with another target's request ID.
@@ -78,6 +80,9 @@ struct TargetRecord: Codable, Identifiable, Hashable, Sendable {
     var targetPublicKeyBase64: String
     var serverCertificateSHA256Hex: String
     var clientIdentityLabel: String
+    var ssh: SSHConnectionSettings? = nil
+    var installedReleaseID: String? = nil
+    var installedReleaseCommit: String? = nil
 
     var id: String { targetID }
 
@@ -88,8 +93,37 @@ struct TargetRecord: Codable, Identifiable, Hashable, Sendable {
 }
 
 enum SynProtocol {
+    static let version: UInt64 = 2
     static let sudoAdapter = "org.syn-approvals.sudo"
     static let approvalTTLMilliseconds: UInt64 = 90_000
+    static let developmentCommit = String(repeating: "0", count: 40)
+
+    static func helloBody(targetID: String) throws -> Data {
+        guard !targetID.isEmpty else { throw SynProtocolError.invalid("target ID is empty") }
+        let release = try currentReleaseIdentity()
+        return try CBORCodec.encode(.map([
+            (.unsigned(0), .unsigned(version)),
+            (.unsigned(1), .unsigned(version)),
+            (.unsigned(2), .text(targetID)),
+            (.unsigned(3), .text(release.id)),
+            (.unsigned(4), .text(release.commit)),
+        ]))
+    }
+
+    static func verifyHello(_ data: Data, targetID: String) throws {
+        let map = try CBORCodec.decodeCanonical(data).integerKeyedMap()
+        let release = try currentReleaseIdentity()
+        guard map.count == 5,
+              map[0]?.unsignedValue == version,
+              map[1]?.unsignedValue == version,
+              map[2]?.textValue == targetID else {
+            throw SynProtocolError.invalid("target hello did not match the pinned target")
+        }
+        guard map[3]?.textValue == release.id,
+              map[4]?.textValue == release.commit else {
+            throw SynProtocolError.invalid("Update required: remote and Mac releases do not match")
+        }
+    }
 
     static func verifyRequest(_ signed: Data, target: TargetRecord) throws -> VerifiedApprovalRequest {
         guard let key = target.publicKey else { throw SynProtocolError.invalid("target public key is invalid") }
@@ -98,8 +132,8 @@ enum SynProtocol {
             throw SynProtocolError.invalid("target key ID does not match")
         }
         let map = try CBORCodec.decodeCanonical(payload).integerKeyedMap()
-        guard map.count == 10,
-              map[0]?.unsignedValue == 1,
+        guard map.count == 12,
+              map[0]?.unsignedValue == version,
               let requestID = map[1]?.bytesValue, requestID.count == 16,
               let nonce = map[2]?.bytesValue, nonce.count == 32,
               let targetID = map[3]?.textValue, targetID == target.targetID,
@@ -108,7 +142,14 @@ enum SynProtocol {
               map[6]?.unsignedValue == 1,
               let issuedRaw = signedInteger(map[7]),
               let ttl = map[8]?.unsignedValue, ttl == approvalTTLMilliseconds,
-              let sudoValue = map[9] else { throw SynProtocolError.invalid("invalid approval request") }
+              let sudoValue = map[9],
+              let releaseID = map[10]?.textValue, ReleaseIdentity.validID(releaseID),
+              let releaseCommit = map[11]?.textValue, validCommit(releaseCommit)
+        else { throw SynProtocolError.invalid("invalid approval request") }
+        let localRelease = try currentReleaseIdentity()
+        guard releaseID == localRelease.id, releaseCommit == localRelease.commit else {
+            throw SynProtocolError.invalid("Update required: remote and Mac releases do not match")
+        }
         let sudo = try parseSudo(sudoValue)
         let issuedAt = Date(timeIntervalSince1970: Double(issuedRaw) / 1_000)
         return VerifiedApprovalRequest(
@@ -129,7 +170,9 @@ enum SynProtocol {
             arguments: sudo.arguments,
             environmentNames: sudo.environmentNames,
             environmentDigest: sudo.environmentDigest,
-            riskMarkers: sudo.riskMarkers
+            riskMarkers: sudo.riskMarkers,
+            releaseID: releaseID,
+            releaseCommit: releaseCommit
         )
     }
 
@@ -139,9 +182,14 @@ enum SynProtocol {
         approverKeyID: Data,
         now: Date = Date()
     ) throws -> Data {
+        let localRelease = try currentReleaseIdentity()
+        guard request.releaseID == localRelease.id,
+              request.releaseCommit == localRelease.commit else {
+            throw SynProtocolError.invalid("Update required: releases do not match")
+        }
         let milliseconds = Int64(now.timeIntervalSince1970 * 1_000)
         return try CBORCodec.encode(.map([
-            (.unsigned(0), .unsigned(1)),
+            (.unsigned(0), .unsigned(version)),
             (.unsigned(1), .bytes(request.requestID)),
             (.unsigned(2), .bytes(request.payloadHash)),
             (.unsigned(3), .text(request.targetID)),
@@ -149,7 +197,31 @@ enum SynProtocol {
             (.unsigned(5), integer(milliseconds)),
             (.unsigned(6), .bytes(approverKeyID)),
             (.unsigned(7), .unsigned(approve ? 1 : 2)),
+            (.unsigned(8), .text(localRelease.id)),
+            (.unsigned(9), .text(localRelease.commit)),
         ]))
+    }
+
+    static func validCommit(_ value: String) -> Bool {
+        value.utf8.count == 40 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
+    }
+
+    private static func currentReleaseIdentity() throws -> (id: String, commit: String) {
+        let identity = ReleaseIdentity.current
+#if DEBUG
+        if identity.releaseID == ReleaseIdentity.developmentID {
+            guard identity.commit == "development" else {
+                throw SynProtocolError.invalid("Invalid app release metadata")
+            }
+            return (identity.releaseID, developmentCommit)
+        }
+#endif
+        guard ReleaseIdentity.validID(identity.releaseID), validCommit(identity.commit) else {
+            throw SynProtocolError.invalid("Invalid app release metadata")
+        }
+        return (identity.releaseID, identity.commit)
     }
 
     static func coseSign1(payload: Data, keyID: Data, signature: Data) throws -> Data {

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -200,6 +201,37 @@ unsafe extern "C" fn plugin_check(
             .map_err(|_| "plug-in state lock is poisoned")?
             .clone()
             .ok_or("plug-in check called before open")?;
+
+        // Parse the final sudo-owned invocation before consulting Syn's files.
+        // The two exact recovery commands authenticate through Syn's fixed PAM
+        // service here, without consulting Syn configuration or a reusable
+        // sudo timestamp. Keeping this path independent of Syn's configuration
+        // is what makes local recovery survive a missing, corrupt, or
+        // mismatched Syn installation.
+        //
+        // SAFETY: sudo owns both NULL-terminated arrays for this callback.
+        let command_info_raw = unsafe { parse_array(command_info, MAX_COMMAND_INFO_ITEMS)? };
+        // SAFETY: same callback-lifetime guarantee.
+        let argv = unsafe { parse_array(run_argv, 256)? };
+        let command_info_map = parse_key_value_bytes(command_info_raw)?;
+        let executable = required(&command_info_map, "command")?.clone();
+        if argv.is_empty() {
+            return Err("sudo supplied an empty final argv");
+        }
+        if is_local_password_recovery(&command_info_map, &executable, &argv)? {
+            if state.non_interactive {
+                hard_notice("Local Syn recovery cannot run through non-interactive sudo.\n");
+                return Ok(0);
+            }
+            hard_notice("Enter this machine's password to restore ordinary sudo.\n");
+            return pam_authenticate_once(
+                "syn-sudo-fallback",
+                &state.invoking_user,
+                state.conversation,
+            )
+            .map(|authenticated| if authenticated { 1 } else { 0 });
+        }
+
         ensure_root_owned_file(Path::new(&state.config_path))?;
         let config = PluginConfig::load(&state.config_path)
             .map_err(|_| "unable to load Syn plug-in configuration")?;
@@ -225,17 +257,8 @@ unsafe extern "C" fn plugin_check(
             return Err("timeout differs between plug-in and policy");
         }
 
-        // SAFETY: sudo owns all three NULL-terminated arrays for this callback.
-        let command_info_raw = unsafe { parse_array(command_info, MAX_COMMAND_INFO_ITEMS)? };
-        // SAFETY: same callback-lifetime guarantee.
-        let argv = unsafe { parse_array(run_argv, 256)? };
-        // SAFETY: same callback-lifetime guarantee.
+        // SAFETY: sudo owns this NULL-terminated array for this callback.
         let environment = unsafe { parse_array(run_envp, 4096)? };
-        let command_info_map = parse_key_value_bytes(command_info_raw)?;
-        let executable = required(&command_info_map, "command")?.clone();
-        if argv.is_empty() {
-            return Err("sudo supplied an empty final argv");
-        }
         if !policy
             .allowed_modes
             .iter()
@@ -261,11 +284,23 @@ unsafe extern "C" fn plugin_check(
         let verified_request = verify_request(&signed_request, target_key.verifying_key())
             .map_err(|_| "internal request verification failed")?;
 
-        hard_notice("Waiting for Syn approval on your Mac…\n");
+        let mut password_escape = PasswordEscape::open(&state);
+        if password_escape.is_some() {
+            hard_notice(
+                "Waiting for Syn approval. Press Enter to use this machine's password instead.\n",
+            );
+        } else {
+            hard_notice("Waiting for Syn approval on your Mac…\n");
+        }
         let signals = SignalGuard::install()?;
         let started = Instant::now();
         let timeout = Duration::from_secs(config.timeout_seconds);
-        let outcome = (|| match exchange_with_agent(&config, &signed_request, started + timeout) {
+        let outcome = (|| match exchange_with_agent(
+            &config,
+            &signed_request,
+            started + timeout,
+            password_escape.as_mut(),
+        ) {
             Ok(AgentReply::Decision(signed_decision)) => {
                 let approval_key = read_verifying_key(&config.approval_public_key)?;
                 let denial_key = read_verifying_key(&config.denial_public_key)?;
@@ -278,10 +313,10 @@ unsafe extern "C" fn plugin_check(
                     timeout,
                 )
             }
-            Ok(AgentReply::Unavailable) | Err(ExchangeError::Unavailable) => {
-                cancellation::wait_until(started + timeout);
-                Ok(DecisionOutcome::Expired)
-            }
+            Ok(AgentReply::Unavailable) | Err(ExchangeError::Unavailable) => Ok(
+                wait_for_approval_or_password(started + timeout, password_escape.as_mut()),
+            ),
+            Err(ExchangeError::PasswordRequested) => Ok(DecisionOutcome::PasswordRequested),
             Err(ExchangeError::Invalid) => Err("Syn received a malformed agent response"),
         })();
         // Restore sudo's signal handlers before any PAM conversation. A
@@ -293,6 +328,7 @@ unsafe extern "C" fn plugin_check(
         match outcome? {
             DecisionOutcome::Approve => Ok(1),
             DecisionOutcome::Expired => fallback_or_deny(&state, &config, &policy),
+            DecisionOutcome::PasswordRequested => password_authenticate(&state, &config),
             DecisionOutcome::Deny => {
                 // A signed denial intentionally does not reveal whether the
                 // user chose Deny or canceled the system authentication sheet.
@@ -301,6 +337,27 @@ unsafe extern "C" fn plugin_check(
             }
         }
     })
+}
+
+fn is_local_password_recovery(
+    command_info: &BTreeMap<String, Vec<u8>>,
+    executable: &[u8],
+    argv: &[Vec<u8>],
+) -> Result<bool, &'static str> {
+    if executable != b"/usr/bin/synctl"
+        || parse_u32(required(command_info, "runas_uid")?, "runas_uid")? != 0
+        || parse_u32(required(command_info, "runas_gid")?, "runas_gid")? != 0
+        || argv.len() != 4
+    {
+        return Ok(false);
+    }
+    Ok(matches!(
+        argv[1..],
+        [ref command, ref restore, ref apply]
+            if matches!(command.as_slice(), b"recover" | b"uninstall")
+                && restore == b"--restore-local-sudo"
+                && apply == b"--apply"
+    ))
 }
 
 fn decision_is_timely(elapsed: Duration, deadline: Duration) -> bool {
@@ -312,6 +369,116 @@ enum DecisionOutcome {
     Approve,
     Deny,
     Expired,
+    PasswordRequested,
+}
+
+struct PasswordEscape {
+    terminal: OwnedFd,
+}
+
+impl PasswordEscape {
+    fn open(state: &PluginState) -> Option<Self> {
+        if state.non_interactive {
+            return None;
+        }
+        let path = state.tty.as_deref()?;
+        if !path.starts_with("/dev/") || path.as_bytes().contains(&0) {
+            return None;
+        }
+        let path = CString::new(path).ok()?;
+        // SAFETY: path is a live NUL-terminated string and open returns an
+        // owned descriptor on success.
+        let descriptor = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY,
+            )
+        };
+        if descriptor < 0 {
+            return None;
+        }
+        // SAFETY: descriptor is newly owned by this process after open.
+        let terminal = unsafe { OwnedFd::from_raw_fd(descriptor) };
+        let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+        let mut terminal_settings: libc::termios = unsafe { std::mem::zeroed() };
+        // Require a real character terminal in canonical mode. This makes one
+        // empty line the complete escape input; redirected stdin and pipes can
+        // never select password authentication.
+        if unsafe { libc::fstat(terminal.as_raw_fd(), &mut metadata) } != 0
+            || metadata.st_mode & libc::S_IFMT != libc::S_IFCHR
+            || unsafe { libc::tcgetattr(terminal.as_raw_fd(), &mut terminal_settings) } != 0
+            || terminal_settings.c_lflag & libc::ICANON == 0
+        {
+            return None;
+        }
+        Some(Self { terminal })
+    }
+
+    fn requested(&mut self) -> std::io::Result<bool> {
+        let mut poll = libc::pollfd {
+            fd: self.terminal.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll points to exactly one initialized descriptor record.
+        let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+        if ready < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+        if ready == 0 || poll.revents & libc::POLLIN == 0 {
+            return Ok(false);
+        }
+        let mut line = [0_u8; 256];
+        // SAFETY: line is writable for its complete length and the descriptor
+        // is nonblocking. Canonical terminal input completes at a newline.
+        let count = unsafe {
+            libc::read(
+                self.terminal.as_raw_fd(),
+                line.as_mut_ptr().cast(),
+                line.len(),
+            )
+        };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        let input = &line[..count as usize];
+        if matches!(input, b"\n" | b"\r\n") {
+            return Ok(true);
+        }
+        hard_notice(
+            "Syn ignored terminal input. Press Enter on an empty line to use the password.\n",
+        );
+        Ok(false)
+    }
+}
+
+fn wait_for_approval_or_password(
+    deadline: Instant,
+    mut password_escape: Option<&mut PasswordEscape>,
+) -> DecisionOutcome {
+    while cancellation::check().is_ok() {
+        if password_escape
+            .as_deref_mut()
+            .is_some_and(|escape| escape.requested().unwrap_or(false))
+        {
+            return DecisionOutcome::PasswordRequested;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        std::thread::sleep(remaining.min(IO_SLICE));
+    }
+    DecisionOutcome::Expired
 }
 
 fn evaluate_decision(
@@ -495,36 +662,43 @@ enum AgentReply {
 enum ExchangeError {
     Unavailable,
     Invalid,
+    PasswordRequested,
 }
 
 fn exchange_with_agent(
     config: &PluginConfig,
     signed_request: &[u8],
     deadline: Instant,
+    mut password_escape: Option<&mut PasswordEscape>,
 ) -> Result<AgentReply, ExchangeError> {
+    check_password_escape(password_escape.as_deref_mut())?;
     let mut stream =
         connect_until(&config.agent_socket, deadline).map_err(|_| ExchangeError::Unavailable)?;
     let message = WireMessageV1::new(message_kind::REQUEST, signed_request.to_vec())
         .and_then(|message| message.encode())
         .map_err(|_| ExchangeError::Invalid)?;
-    write_frame(&mut stream, &message, deadline).map_err(|_| ExchangeError::Unavailable)?;
-    let response = read_frame(&mut stream, deadline).map_err(|error| {
-        if matches!(
-            error.kind(),
-            std::io::ErrorKind::TimedOut
-                | std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::UnexpectedEof
-        ) {
-            ExchangeError::Unavailable
-        } else {
-            ExchangeError::Invalid
-        }
-    })?;
+    write_frame_with_escape(
+        &mut stream,
+        &message,
+        deadline,
+        password_escape.as_deref_mut(),
+    )?;
+    let response = read_frame_with_escape(&mut stream, deadline, password_escape)?;
     let wire = WireMessageV1::decode(&response).map_err(|_| ExchangeError::Invalid)?;
     match wire.kind {
         message_kind::DECISION => Ok(AgentReply::Decision(wire.body.to_vec())),
         message_kind::UNAVAILABLE => Ok(AgentReply::Unavailable),
         _ => Err(ExchangeError::Invalid),
+    }
+}
+
+fn check_password_escape(
+    password_escape: Option<&mut PasswordEscape>,
+) -> Result<(), ExchangeError> {
+    match password_escape.map(PasswordEscape::requested) {
+        Some(Ok(true)) => Err(ExchangeError::PasswordRequested),
+        Some(Err(_)) => Err(ExchangeError::Unavailable),
+        _ => Ok(()),
     }
 }
 
@@ -547,8 +721,17 @@ fn write_until(
     stream: &mut UnixStream,
     mut bytes: &[u8],
     deadline: Instant,
+    mut password_escape: Option<&mut PasswordEscape>,
 ) -> std::io::Result<()> {
     while !bytes.is_empty() {
+        if let Some(escape) = password_escape.as_deref_mut() {
+            if escape.requested()? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "password requested",
+                ));
+            }
+        }
         stream.set_write_timeout(Some(remaining(deadline)?.min(IO_SLICE)))?;
         match stream.write(bytes) {
             Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
@@ -574,9 +757,18 @@ fn read_until(
     bytes: &mut [u8],
     deadline: Instant,
     allow_empty_eof: bool,
+    mut password_escape: Option<&mut PasswordEscape>,
 ) -> std::io::Result<()> {
     let mut received = 0;
     while received < bytes.len() {
+        if let Some(escape) = password_escape.as_deref_mut() {
+            if escape.requested()? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "password requested",
+                ));
+            }
+        }
         stream.set_read_timeout(Some(remaining(deadline)?.min(IO_SLICE)))?;
         match stream.read(&mut bytes[received..]) {
             Ok(0) if allow_empty_eof && received == 0 => {
@@ -600,6 +792,7 @@ fn read_until(
     Ok(())
 }
 
+#[cfg(test)]
 fn write_frame(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> std::io::Result<()> {
     if bytes.len() > MAX_WIRE_BYTES {
         return Err(std::io::Error::new(
@@ -607,13 +800,33 @@ fn write_frame(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> std:
             "oversized frame",
         ));
     }
-    write_until(stream, &(bytes.len() as u32).to_be_bytes(), deadline)?;
-    write_until(stream, bytes, deadline)
+    write_until(stream, &(bytes.len() as u32).to_be_bytes(), deadline, None)?;
+    write_until(stream, bytes, deadline, None)
 }
 
+fn write_frame_with_escape(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    deadline: Instant,
+    mut password_escape: Option<&mut PasswordEscape>,
+) -> Result<(), ExchangeError> {
+    if bytes.len() > MAX_WIRE_BYTES {
+        return Err(ExchangeError::Invalid);
+    }
+    write_until(
+        stream,
+        &(bytes.len() as u32).to_be_bytes(),
+        deadline,
+        password_escape.as_deref_mut(),
+    )
+    .map_err(classify_escape_io)?;
+    write_until(stream, bytes, deadline, password_escape).map_err(classify_escape_io)
+}
+
+#[cfg(test)]
 pub(crate) fn read_frame(stream: &mut UnixStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
     let mut length = [0_u8; 4];
-    read_until(stream, &mut length, deadline, true)?;
+    read_until(stream, &mut length, deadline, true, None)?;
     let length = u32::from_be_bytes(length) as usize;
     if length == 0 || length > MAX_WIRE_BYTES {
         return Err(std::io::Error::new(
@@ -622,8 +835,44 @@ pub(crate) fn read_frame(stream: &mut UnixStream, deadline: Instant) -> std::io:
         ));
     }
     let mut bytes = vec![0_u8; length];
-    read_until(stream, &mut bytes, deadline, false)?;
+    read_until(stream, &mut bytes, deadline, false, None)?;
     Ok(bytes)
+}
+
+fn read_frame_with_escape(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    mut password_escape: Option<&mut PasswordEscape>,
+) -> Result<Vec<u8>, ExchangeError> {
+    let mut length = [0_u8; 4];
+    read_until(
+        stream,
+        &mut length,
+        deadline,
+        true,
+        password_escape.as_deref_mut(),
+    )
+    .map_err(classify_escape_io)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length == 0 || length > MAX_WIRE_BYTES {
+        return Err(ExchangeError::Invalid);
+    }
+    let mut bytes = vec![0_u8; length];
+    read_until(stream, &mut bytes, deadline, false, password_escape).map_err(classify_escape_io)?;
+    Ok(bytes)
+}
+
+fn classify_escape_io(error: std::io::Error) -> ExchangeError {
+    if error.kind() == std::io::ErrorKind::Other && error.to_string() == "password requested" {
+        ExchangeError::PasswordRequested
+    } else if matches!(
+        error.kind(),
+        std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+    ) {
+        ExchangeError::Invalid
+    } else {
+        ExchangeError::Unavailable
+    }
 }
 
 fn fallback_or_deny(
@@ -636,6 +885,19 @@ fn fallback_or_deny(
         return Ok(0);
     }
     hard_notice("Syn approval timed out. Enter your Ubuntu password to continue.\n");
+    pam_authenticate_once(
+        &config.pam_service,
+        &state.invoking_user,
+        state.conversation,
+    )
+    .map(|authenticated| if authenticated { 1 } else { 0 })
+}
+
+fn password_authenticate(
+    state: &PluginState,
+    config: &PluginConfig,
+) -> Result<c_int, &'static str> {
+    hard_notice("Syn request canceled. Enter this machine's password to continue.\n");
     pam_authenticate_once(
         &config.pam_service,
         &state.invoking_user,
@@ -1062,6 +1324,78 @@ mod tests {
     }
 
     #[test]
+    fn only_exact_root_password_recovery_commands_bypass_remote_approval() {
+        let command_info = parse_key_value_bytes(vec![
+            b"command=/usr/bin/synctl".to_vec(),
+            b"runas_uid=0".to_vec(),
+            b"runas_gid=0".to_vec(),
+        ])
+        .unwrap();
+        for command in [b"recover".as_slice(), b"uninstall".as_slice()] {
+            let argv = vec![
+                b"synctl".to_vec(),
+                command.to_vec(),
+                b"--restore-local-sudo".to_vec(),
+                b"--apply".to_vec(),
+            ];
+            assert!(is_local_password_recovery(&command_info, b"/usr/bin/synctl", &argv).unwrap());
+        }
+
+        for argv in [
+            vec![
+                b"synctl".to_vec(),
+                b"recover".to_vec(),
+                b"--restore-local-sudo".to_vec(),
+            ],
+            vec![
+                b"synctl".to_vec(),
+                b"recover".to_vec(),
+                b"--restore-local-sudo".to_vec(),
+                b"--apply".to_vec(),
+                b"--state=/tmp/attacker".to_vec(),
+            ],
+            vec![
+                b"synctl".to_vec(),
+                b"recovery".to_vec(),
+                b"cancel".to_vec(),
+                b"--apply".to_vec(),
+            ],
+        ] {
+            assert!(!is_local_password_recovery(&command_info, b"/usr/bin/synctl", &argv).unwrap());
+        }
+
+        assert!(!is_local_password_recovery(
+            &command_info,
+            b"/tmp/synctl",
+            &[
+                b"synctl".to_vec(),
+                b"recover".to_vec(),
+                b"--restore-local-sudo".to_vec(),
+                b"--apply".to_vec(),
+            ]
+        )
+        .unwrap());
+
+        let non_root = parse_key_value_bytes(vec![
+            b"command=/usr/bin/synctl".to_vec(),
+            b"runas_uid=1000".to_vec(),
+            b"runas_gid=1000".to_vec(),
+        ])
+        .unwrap();
+        assert!(!is_local_password_recovery(
+            &non_root,
+            b"/usr/bin/synctl",
+            &[
+                b"synctl".to_vec(),
+                b"recover".to_vec(),
+                b"--restore-local-sudo".to_vec(),
+                b"--apply".to_vec(),
+            ]
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn direct_shells_are_detectable() {
         assert_eq!(
             risk_markers(b"/usr/bin/apt", &[]),
@@ -1086,7 +1420,7 @@ mod tests {
     #[test]
     fn integrity_and_denial_are_final_even_after_deadline() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
         let target = SigningKey::from_slice(&[1_u8; 32]).unwrap();
         let approval = SigningKey::from_slice(&[2_u8; 32]).unwrap();
         let denial = SigningKey::from_slice(&[3_u8; 32]).unwrap();
@@ -1135,7 +1469,7 @@ mod tests {
     #[test]
     fn signed_approval_cannot_be_replayed_against_changed_execution_intent() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
         // Offline fixture keys only; never read a deployed signing identity.
         let target = SigningKey::from_slice(&[1_u8; 32]).unwrap();
         let approval = SigningKey::from_slice(&[2_u8; 32]).unwrap();
@@ -1216,6 +1550,34 @@ mod tests {
     }
 
     #[test]
+    fn enter_escape_wins_once_and_late_agent_bytes_stay_unconsumed() {
+        let (mut terminal_writer, terminal_reader) = UnixStream::pair().unwrap();
+        let (mut agent_writer, mut agent_reader) = UnixStream::pair().unwrap();
+        let mut escape = PasswordEscape {
+            terminal: terminal_reader.into(),
+        };
+        terminal_writer.write_all(b"\n").unwrap();
+        let outcome = read_frame_with_escape(
+            &mut agent_reader,
+            Instant::now() + Duration::from_secs(1),
+            Some(&mut escape),
+        );
+        assert!(matches!(outcome, Err(ExchangeError::PasswordRequested)));
+
+        // The approval channel is not read after Enter wins. In production its
+        // stream is dropped, which makes the relay cancel this exact request.
+        let frame = b"late decision";
+        agent_writer
+            .write_all(&(frame.len() as u32).to_be_bytes())
+            .unwrap();
+        agent_writer.write_all(frame).unwrap();
+        assert_eq!(
+            read_frame(&mut agent_reader, Instant::now() + Duration::from_secs(1)).unwrap(),
+            frame
+        );
+    }
+
+    #[test]
     fn slow_header_and_body_cannot_restart_deadline() {
         for prewrite_header in [false, true] {
             let (mut reader, mut writer) = UnixStream::pair().unwrap();
@@ -1253,6 +1615,7 @@ mod tests {
             &mut writer,
             &vec![0; 1024 * 1024],
             started + Duration::from_millis(100),
+            None,
         )
         .unwrap_err();
         assert!(matches!(

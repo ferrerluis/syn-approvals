@@ -1,5 +1,6 @@
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -7,10 +8,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{atomic_write, require_root};
 
 pub const RECOVERY_SERVICE: &str = "/usr/lib/systemd/system/syn-auto-recover.service";
+pub const RECOVERY_HELPER: &str = "/var/lib/syn/recovery/synctl";
+const RECOVERY_HELPER_IDENTITY: &str = "/var/lib/syn/recovery/synctl.identity.json";
 pub const RECOVERY_TIMER: &str = "/etc/systemd/system/syn-auto-recover.timer";
 pub const RECOVERY_DEADLINE_STATE: &str = "/var/lib/syn/recovery-deadline.json";
 const TIMER_NAME: &str = "syn-auto-recover.timer";
@@ -20,6 +24,10 @@ const PROOF_TIMER: &str = "/run/systemd/system/syn-recovery-proof.timer";
 const PROOF_TIMER_NAME: &str = "syn-recovery-proof.timer";
 const PROOF_MARKER: &str = "/run/syn-recovery-proof-fired";
 const MANAGED_HEADER: &str = "# Managed by Syn. Do not edit.\n";
+const RECOVERY_DIRECTORY: &str = "/var/lib/syn/recovery";
+const MAX_HELPER_BYTES: u64 = 128 * 1024 * 1024;
+const EXPECTED_RECOVERY_SERVICE: &[u8] =
+    include_bytes!("../../../packaging/systemd/syn-auto-recover.service");
 pub const MIN_INSTALL_RECOVERY_SECONDS: u64 = 10 * 60;
 const ARM_SYSTEMCTL_COMMANDS: &[&[&str]] = &[
     &["daemon-reload"],
@@ -33,6 +41,14 @@ struct DeadlineState {
     schema_version: u16,
     armed_at_unix_seconds: u64,
     deadline_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryHelperIdentity {
+    schema_version: u16,
+    sha256: String,
+    size: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,6 +136,7 @@ pub fn arm(minutes: u64, apply: bool) -> Result<RecoveryActionReport> {
     }
     require_root()?;
     validate_recovery_service(Path::new(RECOVERY_SERVICE))?;
+    validate_recovery_helper(Path::new(RECOVERY_HELPER))?;
     validate_existing_managed_timer(Path::new(RECOVERY_TIMER))?;
     validate_existing_deadline_state(Path::new(RECOVERY_DEADLINE_STATE))?;
 
@@ -145,10 +162,34 @@ pub fn arm(minutes: u64, apply: bool) -> Result<RecoveryActionReport> {
         }
         Ok(())
     })() {
-        let _ = disarm_files(true);
+        let _ = disarm_files(true, true);
         return Err(error);
     }
     Ok(report)
+}
+
+/// Retain a known-good root-owned synctl before package replacement. An
+/// existing valid helper is deliberately preserved, even when `source` is a
+/// newer candidate; call `commit_helper` only after activation completes.
+pub fn prepare_helper(source: &Path) -> Result<()> {
+    require_root()?;
+    validate_helper_source(source)?;
+    ensure_recovery_directory()?;
+    match fs::symlink_metadata(RECOVERY_HELPER) {
+        Ok(_) => validate_recovery_helper(Path::new(RECOVERY_HELPER)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => install_helper_copy(source),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Replace the retained helper with the candidate only after that exact
+/// release has completed its privileged activation transaction.
+pub fn commit_helper(source: &Path) -> Result<()> {
+    require_root()?;
+    validate_helper_source(source)?;
+    ensure_recovery_directory()?;
+    validate_recovery_helper(Path::new(RECOVERY_HELPER))?;
+    install_helper_copy(source)
 }
 
 pub fn cancel(apply: bool) -> Result<RecoveryActionReport> {
@@ -163,15 +204,13 @@ pub fn cancel(apply: bool) -> Result<RecoveryActionReport> {
         return Ok(report);
     }
     require_root()?;
-    if systemctl_check("is-active", RECOVERY_SERVICE_NAME) {
-        bail!("recovery is already running; refusing to race it");
-    }
-    disarm_files(true)?;
+    disarm_files(true, true)?;
     Ok(report)
 }
 
 pub fn disarm_after_recovery() -> Result<()> {
-    disarm_files(true)
+    // This path runs inside the recovery service itself.
+    disarm_files(true, false)
 }
 
 pub fn prove(seconds: u64, apply: bool) -> Result<RecoveryProofReport> {
@@ -224,6 +263,10 @@ pub fn prove(seconds: u64, apply: bool) -> Result<RecoveryProofReport> {
 
 pub fn has_minimum_remaining(seconds: u64) -> bool {
     let current = status();
+    report_has_minimum_remaining(&current, seconds)
+}
+
+fn report_has_minimum_remaining(current: &RecoveryTimerReport, seconds: u64) -> bool {
     current.armed
         && current
             .seconds_remaining
@@ -255,14 +298,31 @@ fn classify_recovery_state(
     }
 }
 
-fn disarm_files(reload: bool) -> Result<()> {
+fn disarm_files(reload: bool, stop_recovery: bool) -> Result<()> {
     validate_existing_managed_timer(Path::new(RECOVERY_TIMER))?;
     validate_existing_deadline_state(Path::new(RECOVERY_DEADLINE_STATE))?;
-    let _ = Command::new("systemctl")
-        .args(["disable", "--now", TIMER_NAME])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let timer_known = Path::new(RECOVERY_TIMER).try_exists()?
+        || systemctl_check("is-active", TIMER_NAME)
+        || systemctl_check("is-enabled", TIMER_NAME);
+    if timer_known {
+        run_systemctl(&["disable", "--now", TIMER_NAME])?;
+        if systemctl_check("is-active", TIMER_NAME) || systemctl_check("is-enabled", TIMER_NAME) {
+            bail!("automatic recovery timer remained active or enabled after disable");
+        }
+    }
+    if stop_recovery
+        && (timer_known
+            || Path::new(RECOVERY_SERVICE).try_exists()?
+            || systemctl_check("is-active", RECOVERY_SERVICE_NAME))
+    {
+        // Stopping the timer does not cancel an already queued service job.
+        // Quiesce it before discarding deadline evidence; the caller must then
+        // recheck sudo coupling in case recovery already removed it.
+        run_systemctl(&["stop", RECOVERY_SERVICE_NAME])?;
+        if systemctl_check("is-active", RECOVERY_SERVICE_NAME) {
+            bail!("automatic recovery service remained active after stop");
+        }
+    }
     for path in [RECOVERY_TIMER, RECOVERY_DEADLINE_STATE] {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -281,18 +341,250 @@ fn validate_recovery_service(path: &Path) -> Result<()> {
         .with_context(|| format!("inspect recovery service {}", path.display()))?;
     if !metadata.file_type().is_file()
         || metadata.uid() != 0
-        || metadata.permissions().mode() & 0o022 != 0
+        || metadata.gid() != 0
+        || metadata.permissions().mode() & 0o7777 != 0o644
     {
-        bail!("recovery service must be a root-owned, non-writable regular file");
+        bail!("recovery service must be a root-owned regular file with mode 0644");
     }
-    let contents = fs::read_to_string(path)?;
-    if !contents
-        .lines()
-        .any(|line| line == "ExecStart=/usr/bin/synctl recover --restore-local-sudo --apply")
-    {
-        bail!("recovery service has an unexpected command");
+    if fs::read(path)? != EXPECTED_RECOVERY_SERVICE {
+        bail!("recovery service differs from the exact packaged unit");
     }
     Ok(())
+}
+
+fn validate_helper_source(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect recovery helper source {}", path.display()))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o111 == 0
+        || metadata.len() == 0
+        || metadata.len() > MAX_HELPER_BYTES
+    {
+        bail!("recovery helper source is not a protected root-owned executable");
+    }
+    Ok(())
+}
+
+fn validate_recovery_helper(path: &Path) -> Result<()> {
+    validate_recovery_helper_file(path)?;
+    let recorded = read_recovery_helper_identity(Path::new(RECOVERY_HELPER_IDENTITY))?;
+    let actual = recovery_helper_identity(path)?;
+    if !helper_identity_matches(&recorded, &actual) {
+        bail!("retained recovery helper differs from its durable identity");
+    }
+    Ok(())
+}
+
+fn validate_recovery_helper_file(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspect retained recovery helper {}", path.display()))?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o7777 != 0o500
+        || metadata.len() == 0
+        || metadata.len() > MAX_HELPER_BYTES
+    {
+        bail!("retained recovery helper must be root-owned mode 0500");
+    }
+    Ok(())
+}
+
+fn recovery_helper_identity(path: &Path) -> Result<RecoveryHelperIdentity> {
+    let mut input = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = input.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o7777 != 0o500
+        || metadata.len() == 0
+        || metadata.len() > MAX_HELPER_BYTES
+    {
+        bail!("opened retained recovery helper is unsafe");
+    }
+    Ok(RecoveryHelperIdentity {
+        schema_version: 1,
+        sha256: hex::encode(hash_reader(&mut input)?),
+        size: metadata.len(),
+    })
+}
+
+fn read_recovery_helper_identity(path: &Path) -> Result<RecoveryHelperIdentity> {
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("open retained recovery helper identity {}", path.display()))?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        bail!("retained recovery helper identity must be root-owned mode 0600");
+    }
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    let identity: RecoveryHelperIdentity = serde_json::from_slice(&contents)?;
+    if !valid_helper_identity(&identity) {
+        bail!("retained recovery helper identity is invalid");
+    }
+    Ok(identity)
+}
+
+fn valid_helper_identity(identity: &RecoveryHelperIdentity) -> bool {
+    identity.schema_version == 1
+        && identity.size != 0
+        && identity.size <= MAX_HELPER_BYTES
+        && identity.sha256.len() == 64
+        && identity
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn helper_identity_matches(
+    recorded: &RecoveryHelperIdentity,
+    actual: &RecoveryHelperIdentity,
+) -> bool {
+    valid_helper_identity(recorded) && valid_helper_identity(actual) && recorded == actual
+}
+
+fn ensure_recovery_directory() -> Result<()> {
+    let path = Path::new(RECOVERY_DIRECTORY);
+    match fs::create_dir(path) {
+        Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o700))?,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        bail!("recovery directory must be root-owned mode 0700");
+    }
+    Ok(())
+}
+
+fn install_helper_copy(source: &Path) -> Result<()> {
+    let mut input = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(source)?;
+    let source_metadata = input.metadata()?;
+    if !source_metadata.is_file()
+        || source_metadata.uid() != 0
+        || source_metadata.gid() != 0
+        || source_metadata.mode() & 0o022 != 0
+        || source_metadata.mode() & 0o111 == 0
+        || source_metadata.len() == 0
+        || source_metadata.len() > MAX_HELPER_BYTES
+    {
+        bail!("opened recovery helper source changed or is unsafe");
+    }
+
+    let temporary = Path::new(RECOVERY_DIRECTORY).join(format!(
+        ".synctl.incomplete.{}.{}",
+        std::process::id(),
+        unix_seconds()?
+    ));
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o500)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)?;
+    let copy_result = (|| -> Result<[u8; 32]> {
+        let mut source_hash = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut copied = 0_u64;
+        loop {
+            let count = input.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            copied = copied
+                .checked_add(count as u64)
+                .context("recovery helper size overflow")?;
+            if copied > MAX_HELPER_BYTES {
+                bail!("recovery helper source grew beyond its size limit");
+            }
+            source_hash.update(&buffer[..count]);
+            output.write_all(&buffer[..count])?;
+        }
+        if copied != source_metadata.len() || input.metadata()?.len() != source_metadata.len() {
+            bail!("recovery helper source changed while it was copied");
+        }
+        output.sync_all()?;
+        Ok(source_hash.finalize().into())
+    })();
+    drop(output);
+    let source_hash = match copy_result {
+        Ok(hash) => hash,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    if hash_file(&temporary)? != source_hash {
+        let _ = fs::remove_file(&temporary);
+        bail!("retained recovery helper hash differs from its protected source");
+    }
+    fs::rename(&temporary, RECOVERY_HELPER)?;
+    fs::File::open(RECOVERY_DIRECTORY)?.sync_all()?;
+    validate_recovery_helper_file(Path::new(RECOVERY_HELPER))?;
+    if hash_file(Path::new(RECOVERY_HELPER))? != source_hash {
+        bail!("retained recovery helper changed after installation");
+    }
+    let identity = recovery_helper_identity(Path::new(RECOVERY_HELPER))?;
+    if identity.sha256 != hex::encode(source_hash) {
+        bail!("retained recovery helper identity differs from its protected source");
+    }
+    atomic_write(
+        Path::new(RECOVERY_HELPER_IDENTITY),
+        &serde_json::to_vec_pretty(&identity)?,
+        0o600,
+    )?;
+    validate_recovery_helper(Path::new(RECOVERY_HELPER))?;
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<[u8; 32]> {
+    let mut input = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    hash_reader(&mut input)
+}
+
+fn hash_reader(input: &mut impl Read) -> Result<[u8; 32]> {
+    let mut hash = Sha256::new();
+    let copied = std::io::copy(input, &mut HashWriter(&mut hash))?;
+    if copied == 0 || copied > MAX_HELPER_BYTES {
+        bail!("retained recovery helper has an invalid size");
+    }
+    Ok(hash.finalize().into())
+}
+
+struct HashWriter<'a>(&'a mut Sha256);
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn validate_existing_managed_timer(path: &Path) -> Result<()> {
@@ -445,5 +737,77 @@ mod tests {
             classify_recovery_state(true, true, true, false, true, Some(900)),
             ("inconsistent", false)
         );
+    }
+
+    #[test]
+    fn minimum_window_requires_a_live_armed_deadline() {
+        let report = RecoveryTimerReport {
+            status: "armed",
+            armed: true,
+            state_valid: true,
+            timer_active: true,
+            timer_enabled: true,
+            deadline_unix_seconds: Some(1_000),
+            seconds_remaining: Some(MIN_INSTALL_RECOVERY_SECONDS),
+            state_path: RECOVERY_DEADLINE_STATE.into(),
+            timer_path: RECOVERY_TIMER.into(),
+        };
+        assert!(report_has_minimum_remaining(
+            &report,
+            MIN_INSTALL_RECOVERY_SECONDS
+        ));
+        let mut expired = report.clone();
+        expired.seconds_remaining = Some(MIN_INSTALL_RECOVERY_SECONDS - 1);
+        assert!(!report_has_minimum_remaining(
+            &expired,
+            MIN_INSTALL_RECOVERY_SECONDS
+        ));
+        expired.armed = false;
+        expired.seconds_remaining = Some(MIN_INSTALL_RECOVERY_SECONDS);
+        assert!(!report_has_minimum_remaining(
+            &expired,
+            MIN_INSTALL_RECOVERY_SECONDS
+        ));
+    }
+
+    #[test]
+    fn recovery_service_has_no_state_condition_and_retries_boundedly() {
+        let service = String::from_utf8(EXPECTED_RECOVERY_SERVICE.to_vec()).unwrap();
+        assert!(!service.contains("ConditionPathExists="));
+        assert!(service.contains(
+            "ExecStart=/var/lib/syn/recovery/synctl recover --restore-local-sudo --apply"
+        ));
+        assert!(service.contains("Restart=on-failure\n"));
+        assert!(service.contains("RestartSec=2s\n"));
+        assert!(service.contains("StartLimitIntervalSec=30s\n"));
+        assert!(service.contains("StartLimitBurst=5\n"));
+    }
+
+    #[test]
+    fn retained_helper_identity_rejects_content_or_size_drift() {
+        let identity = RecoveryHelperIdentity {
+            schema_version: 1,
+            sha256: "ab".repeat(32),
+            size: 4096,
+        };
+        assert!(helper_identity_matches(&identity, &identity));
+        assert!(!helper_identity_matches(
+            &identity,
+            &RecoveryHelperIdentity {
+                sha256: "cd".repeat(32),
+                ..identity.clone()
+            }
+        ));
+        assert!(!helper_identity_matches(
+            &identity,
+            &RecoveryHelperIdentity {
+                size: 4097,
+                ..identity.clone()
+            }
+        ));
+        assert!(!valid_helper_identity(&RecoveryHelperIdentity {
+            sha256: "AB".repeat(32),
+            ..identity
+        }));
     }
 }
