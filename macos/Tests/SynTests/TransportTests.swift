@@ -43,6 +43,29 @@ import Testing
     #expect(progress.classified(URLError(.networkConnectionLost)) is URLError)
 }
 
+@Test @MainActor func helloReleaseMismatchPausesMachineAsUpdateRequired() throws {
+    let target = TargetRecord(
+        targetID: "test", displayName: "Test Pi",
+        webSocketURL: try #require(URL(string: "wss://test.example:41781")),
+        targetPublicKeyBase64: "", serverCertificateSHA256Hex: "",
+        clientIdentityLabel: "Syn test transport"
+    )
+    let model = SynModel(startServices: false)
+    let current = try SynProtocol.helloBody(targetID: target.targetID)
+    model.handleTargetMessage(.success(.init(kind: .hello, body: current)), from: target)
+    #expect(model.connectedTargets.contains(target.targetID))
+
+    var map = try CBORCodec.decodeCanonical(current).integerKeyedMap()
+    map[3] = .text("20260908000000")
+    let mismatched = try CBORCodec.encode(.map(map.map { (.unsigned($0.key), $0.value) }))
+    model.handleTargetMessage(.success(.init(kind: .hello, body: mismatched)), from: target)
+
+    #expect(!model.connectedTargets.contains(target.targetID))
+    #expect(model.pausedConnections.contains(target.targetID))
+    #expect(model.updateRequiredTargets.contains(target.targetID))
+    #expect(model.connectionErrors[target.targetID]?.hasPrefix("Update required:") == true)
+}
+
 @Test func failedTrustCannotBecomeAnAutomaticRetry() {
     let progress = HandshakeProgress()
     progress.recordTrust(false)

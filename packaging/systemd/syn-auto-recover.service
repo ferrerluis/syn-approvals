@@ -1,13 +1,16 @@
 [Unit]
 Description=Syn automatic restoration of ordinary password sudo
 Documentation=https://github.com/ferrerluis/syn-approvals
-ConditionPathExists=/var/lib/syn/install-state.json
+StartLimitIntervalSec=30s
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
 User=root
 Group=root
-ExecStart=/usr/bin/synctl recover --restore-local-sudo --apply
+ExecStart=/var/lib/syn/recovery/synctl recover --restore-local-sudo --apply
+Restart=on-failure
+RestartSec=2s
 UMask=0077
 PrivateTmp=yes
 ProtectHome=yes

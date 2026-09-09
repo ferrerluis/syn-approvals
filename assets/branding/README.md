@@ -1,31 +1,50 @@
 # Syn branding
 
-Current slimmer, warm-gold/taupe artwork supplied by Luis on 2026-09-05. These files are unchanged apart from descriptive filenames; `color/` corresponds to the supplied `Syn 4` folder and `monochrome/` to `Syn 3`. The unrelated exploratory artwork under local `output/` is not part of this brand set.
+Current illustrated artwork supplied by Luis on 2026-09-05. Files are unchanged
+apart from descriptive filenames. The unrelated exploratory artwork under local
+`output/` isn't part of this set.
 
-| Surface | Artwork | Size and format |
+| Surface | Artwork | Source |
 | --- | --- | --- |
-| README and documentation | Color logo | SVG; README displays it at 112 × 112 CSS pixels |
-| Mac sidebar / approval header | Color logo | Supplied 411px PNG, displayed at 32 / 36 points |
-| Dock, Finder, About and notification identity | Color logo | Generated `Syn.icns`, 16–1024 physical pixels with 8% transparent padding |
-| macOS menu bar | Black logo | SVG-backed template image, 18 points; 24-point canvas with a pending-request dot |
-| Raster-only consumers | Matching supplied PNG | Choose the smallest export at least as large as the required physical pixels; do not enlarge a small export |
-
-The black artwork is black plus transparency, not a black background. AppKit treats the menu image as a template and supplies the appropriate light/dark/highlight contrast. Pending requests retain a visible indicator and an accessible label; color is not the only status signal. [Apple template-image behavior](https://developer.apple.com/documentation/appkit/nsimage/istemplate).
+| README and light-mode app UI | Light illustrated icon | 1022px PNG |
+| Dark-mode app UI | Dark illustrated icon | 1022px PNG |
+| Dock | Matching light/dark illustrated icon | Generated ICNS files, 16–1024px |
+| Finder and system identity | Light illustrated icon | `Syn.icns` |
+| macOS menu bar | Black template mark | SVG, aspect-fitted to 18 points |
 
 ## Original exports
 
-Each variant has an SVG and four transparent PNGs: 411 × 411 (`1x`), 822 × 822 (`2x`), 1232 × 1232 (`3x`) and 1643 × 1643 (`4x`). Export labels are nominal; use these actual pixel dimensions when selecting a raster.
+- `light/` contains the 1022px and 2044px Group 11 PNG exports.
+- `dark/` contains the 1022px and 2044px Group 12 PNG exports.
+- `menu-bar/` contains the Group 13 SVG and its 987×1087 and 1974×2174 PNG
+  exports.
 
-The black SVG is entirely vector. The color SVG retains the supplied vector silhouette with an embedded 1254 × 1254 texture; it is not an infinitely detailed vector gradient. Preserve that texture and transparency; do not recolor, flatten onto a background, or redraw the mark without a new design decision.
+The supplied 3× and 4× app-icon PNGs are byte-identical designs at larger
+resolutions but total roughly 86 MB because of the texture. They aren't committed:
+the 2044px sources already exceed macOS's 1024px maximum and generate every
+required native size without upscaling.
 
-## Build and maintenance
+The Syn project's PARA `branding/` collection retains all 11 supplied originals.
+Its `archive/` directory preserves the superseded color and monochrome carabiner
+sets.
 
-The canonical originals live here. Exact copies of the black SVG and 411px color PNG in `macos/Sources/Syn/Resources/Branding` are the only artwork shipped as Swift package resources. Tests enforce byte-for-byte agreement; unused export sizes are not bundled into the app.
+## Appearance and packaging
 
-The color SVG remains preferred for browser/documentation use. Native AppKit rendering of this particular embedded SVG texture produced a visible horizontal seam during visual QA, so native color surfaces use the supplied PNGs. This is a format compatibility choice, not a redraw or change to the originals.
+The light and dark app images are separate originals. SwiftUI selects the matching
+image for the current color scheme. The launch delegate selects the matching ICNS
+for the running Dock tile and observes appearance changes. The bundle registers
+the light ICNS for Finder and other legacy system surfaces.
 
-`scripts/build-macos-app.sh` packages the resource bundle and uses `scripts/build-branding.swift` plus Apple's `iconutil` to render the app icon at every required resolution from the 1643px color PNG. No raster is upscaled. No network access, authentication, private key or installed-app replacement is involved in asset generation.
+The menu artwork is black plus transparency. AppKit treats it as a template and
+supplies light, dark and highlighted contrast. The source isn't square, so Syn
+aspect-fits it rather than stretching it. Pending requests retain a separate dot
+and accessible label.
 
-The package smoke test compiles the actual `SynBranding` code into a relocated probe app, without linking Syn's model or services. It verifies that lookup returns the packaged artwork, then hides that artwork and checks the safe symbol fallback. Build-tree resources remain present to catch accidental dependencies on SwiftPM's absolute fallback path.
+`scripts/build-macos-app.sh` creates both ICNS files from the 2044px sources.
+macOS owns the Dock shadow but doesn't normalize optical size, so the generated
+icons keep an 8% transparent inset around the supplied rounded-square artwork.
 
-PARA stores the original files and durable brand guidance under the Syn project's `branding` collection. The launch delegate explicitly installs the packaged color ICNS as the running Dock icon; `CFBundleIconFile` supplies Finder and other system surfaces. Source code and generated app bundles remain in the repository/build workspace, not in PARA.
+The package smoke test compiles the real `SynBranding` code into a relocated
+probe app without linking the model, authentication or transport services. It
+checks exact packaged resources, both appearance mappings, every 16–1024px icon
+size and the missing-artwork fallback.

@@ -19,7 +19,70 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+// Version 2 requires the exact compiled release identity inside both signed
+// messages. Version 1 approvals must not survive an installation transition.
+pub const PROTOCOL_VERSION: u16 = 2;
+pub const DEVELOPMENT_RELEASE_ID: &str = "00000000000000";
+pub const DEVELOPMENT_RELEASE_COMMIT: &str = "0000000000000000000000000000000000000000";
+
+pub fn release_id() -> &'static str {
+    option_env!("SYN_RELEASE_ID").unwrap_or(if cfg!(debug_assertions) {
+        DEVELOPMENT_RELEASE_ID
+    } else {
+        ""
+    })
+}
+
+pub fn release_commit() -> &'static str {
+    option_env!("SYN_RELEASE_COMMIT").unwrap_or(if cfg!(debug_assertions) {
+        DEVELOPMENT_RELEASE_COMMIT
+    } else {
+        ""
+    })
+}
+
+fn validate_release_id(value: &str) -> Result<(), ProtocolError> {
+    if value.len() != 14 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(validation("invalid release ID"));
+    }
+    if value == DEVELOPMENT_RELEASE_ID {
+        return Ok(());
+    }
+    let part = |range: std::ops::Range<usize>| {
+        value[range]
+            .parse::<u32>()
+            .map_err(|_| validation("invalid release ID"))
+    };
+    let year = part(0..4)?;
+    let month = part(4..6)?;
+    let day = part(6..8)?;
+    let hour = part(8..10)?;
+    let minute = part(10..12)?;
+    let second = part(12..14)?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year < 2026 || day == 0 || day > days || hour > 23 || minute > 59 || second > 59 {
+        return Err(validation("invalid release ID"));
+    }
+    Ok(())
+}
+
+fn validate_release_commit(value: &str) -> Result<(), ProtocolError> {
+    if value.len() != 40
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(validation("invalid release commit"));
+    }
+    Ok(())
+}
 pub const SUDO_ADAPTER_KIND: &str = "org.syn-approvals.sudo";
 pub const SUDO_SCHEMA_VERSION: u16 = 1;
 pub const DEFAULT_TTL_MS: u32 = 90_000;
@@ -137,6 +200,10 @@ pub struct ApprovalRequestV1 {
     pub ttl_ms: u32,
     #[n(9)]
     pub sudo: SudoIntentV1,
+    #[n(10)]
+    pub release_id: String,
+    #[n(11)]
+    pub release_commit: String,
 }
 
 impl ApprovalRequestV1 {
@@ -156,10 +223,14 @@ impl ApprovalRequestV1 {
             issued_at_unix_ms: unix_time_ms(),
             ttl_ms: DEFAULT_TTL_MS,
             sudo,
+            release_id: release_id().to_owned(),
+            release_commit: release_commit().to_owned(),
         }
     }
 
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_release_id(&self.release_id)?;
+        validate_release_commit(&self.release_commit)?;
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(validation("unsupported protocol version"));
         }
@@ -262,6 +333,10 @@ pub struct DecisionV1 {
     pub approver_key_id: ByteVec,
     #[n(7)]
     pub authentication_class: AuthenticationClass,
+    #[n(8)]
+    pub release_id: String,
+    #[n(9)]
+    pub release_commit: String,
 }
 
 impl DecisionV1 {
@@ -280,10 +355,15 @@ impl DecisionV1 {
             decided_at_unix_ms: unix_time_ms(),
             approver_key_id: key_id(approver_key).to_vec().into(),
             authentication_class: class,
+            // Sign the approver's build identity, not relay-supplied values.
+            release_id: release_id().to_owned(),
+            release_commit: release_commit().to_owned(),
         }
     }
 
     pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_release_id(&self.release_id)?;
+        validate_release_commit(&self.release_commit)?;
         if self.protocol_version != PROTOCOL_VERSION {
             return Err(validation("unsupported decision protocol version"));
         }
@@ -305,6 +385,8 @@ impl DecisionV1 {
         self.request_id.as_slice() == request.request.request_id.as_slice()
             && self.request_payload_hash.as_slice() == request.payload_hash
             && self.target_id == request.request.target_id
+            && self.release_id == request.request.release_id
+            && self.release_commit == request.request.release_commit
     }
 }
 
@@ -341,6 +423,10 @@ pub struct HelloV1 {
     pub maximum_version: u16,
     #[n(2)]
     pub target_id: String,
+    #[n(3)]
+    pub release_id: String,
+    #[n(4)]
+    pub release_commit: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
@@ -751,6 +837,71 @@ mod tests {
     }
 
     #[test]
+    fn signed_decision_must_match_the_targets_exact_release() {
+        let target = generate_signing_key();
+        let approver = generate_signing_key();
+        let request =
+            ApprovalRequestV1::new("test".into(), target.verifying_key(), sample_intent());
+        let request = verify_request(
+            &sign_request(&request, &target).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let mut decision = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            approver.verifying_key(),
+        );
+        assert!(decision.matches(&request));
+
+        decision.release_commit = "1111111111111111111111111111111111111111".into();
+        if decision.release_commit == request.request.release_commit {
+            decision.release_commit = "2222222222222222222222222222222222222222".into();
+        }
+        let verified = verify_decision(
+            &sign_decision(&decision, &approver).unwrap(),
+            approver.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(verified.decision.release_id, request.request.release_id);
+        assert!(!verified.decision.matches(&request));
+
+        decision.release_commit = request.request.release_commit.clone();
+        decision.release_id = "20260905000001".into();
+        if decision.release_id == request.request.release_id {
+            decision.release_id = "20260905000002".into();
+        }
+        let verified = verify_decision(
+            &sign_decision(&decision, &approver).unwrap(),
+            approver.verifying_key(),
+        )
+        .unwrap();
+        assert!(!verified.decision.matches(&request));
+
+        decision.release_commit = "not-a-commit".into();
+        assert!(sign_decision(&decision, &approver).is_err());
+    }
+
+    #[test]
+    fn release_timestamp_is_a_real_utc_second_or_the_development_sentinel() {
+        for valid in [DEVELOPMENT_RELEASE_ID, "20260228235959", "20280229000000"] {
+            assert!(validate_release_id(valid).is_ok(), "{valid}");
+        }
+        for invalid in [
+            "20250901000000",
+            "20260229000000",
+            "20261301000000",
+            "20260931235959",
+            "20260901240000",
+            "20260901236000",
+            "20260901235960",
+        ] {
+            assert!(validate_release_id(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn request_and_decision_round_trip() {
         let target_key = generate_signing_key();
         let approval_key = generate_signing_key();
@@ -815,7 +966,7 @@ mod tests {
     #[test]
     fn published_golden_vectors_verify() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
         let target = SigningKey::from_slice(&[1; 32]).unwrap();
         let approval = SigningKey::from_slice(&[2; 32]).unwrap();
         let denial = SigningKey::from_slice(&[3; 32]).unwrap();
@@ -845,6 +996,18 @@ mod tests {
         let denial = verify_decision(&denial_bytes, denial.verifying_key()).unwrap();
         assert!(denial.decision.matches(&request));
         assert_eq!(denial.decision.action, DecisionAction::Deny);
+    }
+
+    #[test]
+    fn version_one_signed_messages_are_rejected() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v1.json")).unwrap();
+        let target = SigningKey::from_slice(&[1; 32]).unwrap();
+        let approval = SigningKey::from_slice(&[2; 32]).unwrap();
+        let request = hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap();
+        let decision = hex::decode(fixture["signed_approval_hex"].as_str().unwrap()).unwrap();
+        assert!(verify_request(&request, target.verifying_key()).is_err());
+        assert!(verify_decision(&decision, approval.verifying_key()).is_err());
     }
 
     #[test]

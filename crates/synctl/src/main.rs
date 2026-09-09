@@ -1,7 +1,10 @@
 mod installer;
+mod maintenance;
+mod onboarding;
 mod preflight;
 mod providers;
 mod recovery_timer;
+mod recovery_worker;
 
 use std::fs;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -15,7 +18,7 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use syn_config::{
-    AgentConfig, OverlayKind, PluginConfig, Policy, DEFAULT_AGENT_CONFIG, DEFAULT_INSTALL_STATE,
+    AgentConfig, PluginConfig, Policy, DEFAULT_AGENT_CONFIG, DEFAULT_INSTALL_STATE,
     DEFAULT_PLUGIN_CONFIG, DEFAULT_POLICY_PATH,
 };
 use syn_protocol::{
@@ -25,7 +28,7 @@ use syn_protocol::{
 use zeroize::Zeroizing;
 
 #[derive(Debug, Parser)]
-#[command(name = "synctl", version, about = "Manage and diagnose a Syn target")]
+#[command(name = "synctl", version = syn_protocol::release_id(), about = "Manage and diagnose a Syn target")]
 struct Cli {
     /// Emit one stable JSON value on stdout.
     #[arg(long, global = true)]
@@ -69,14 +72,44 @@ enum TopLevel {
     Install(InstallArguments),
     /// Restore ordinary password sudo using recorded state.
     Recover(RecoverArguments),
-    /// Recover ordinary sudo; key deletion remains manual.
+    /// Recover ordinary sudo and remove Syn; protected keys and backups remain.
     Uninstall(RecoverArguments),
     /// Restore local sudo and remove the current Mac's public pairing material.
     Unpair(UnpairArguments),
-    /// Prove, arm, inspect, or cancel the Pi-local automatic recovery timer.
+    /// Prove, arm, inspect, or cancel the machine-local automatic recovery timer.
     Recovery {
         #[command(subcommand)]
         command: RecoveryCommand,
+    },
+    /// Stage the exact Mac-selected release for guided installation or update.
+    Onboard {
+        #[command(subcommand)]
+        command: OnboardCommand,
+    },
+    /// Install, serve, or revoke Syn's restricted root maintenance key.
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MaintenanceCommand {
+    /// Retain this helper and add one restricted root SSH key.
+    Install {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Serve the forced-command maintenance protocol.
+    Serve,
+    /// Remove only the exact maintenance key entry installed by Syn.
+    Revoke {
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -220,6 +253,54 @@ enum RecoveryCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum OnboardCommand {
+    /// Verify and optionally copy ordinary-user inputs into protected staging.
+    Prepare {
+        #[arg(long)]
+        request_sha256: String,
+        #[arg(long)]
+        source_sha256: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Remove the root-only bootstrap copy after protected staging succeeds.
+    Cleanup {
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Build the staged release under Syn's locked non-administrator account.
+    Build {
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Install the package, preserve or create identities, and start pairing.
+    Configure {
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Run a signed preflight, arm recovery, and activate the sudo gate.
+    Activate {
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Verify the installed release through a fresh approval, then disarm recovery.
+    Complete {
+        #[arg(long)]
+        operation_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
+}
+
 #[derive(Debug, Args)]
 struct InstallArguments {
     #[arg(long)]
@@ -280,7 +361,7 @@ struct DoctorReport {
     policy: Check,
     identity_coupling: Check,
     agent_socket: Check,
-    overlay: Check,
+    network: Check,
     sudo_ws: Check,
     sudo_rs_provider: Check,
     sudo_coupling: Check,
@@ -297,13 +378,15 @@ struct Check {
 
 #[derive(Debug, Serialize)]
 struct StatusReport {
-    configured: bool,
+    schema_version: u16,
+    configured: Option<bool>,
+    configuration_state: &'static str,
+    release_id: &'static str,
+    release_commit: &'static str,
     target_id: Option<String>,
     managed_user: Option<String>,
     managed_uid: Option<u32>,
     listen: Option<String>,
-    overlay: Option<OverlayKind>,
-    approver_ip: Option<String>,
     timeout_seconds: Option<u64>,
     agent_socket: Option<String>,
     target_key_id: Option<String>,
@@ -453,13 +536,56 @@ fn run(cli: &Cli) -> Result<()> {
             }
             output(cli.json, plan)
         }
-        TopLevel::Recover(arguments) | TopLevel::Uninstall(arguments) => {
+        TopLevel::Recover(arguments) => {
             if !arguments.restore_local_sudo {
                 bail!("recovery requires --restore-local-sudo");
             }
             output(
                 cli.json,
                 installer::recover(&arguments.state, arguments.apply)?,
+            )
+        }
+        TopLevel::Uninstall(arguments) => {
+            if !arguments.restore_local_sudo {
+                bail!("uninstall requires --restore-local-sudo");
+            }
+            let actions = vec![
+                "remove Syn's NOPASSWD rule before any other teardown",
+                "restore ordinary password sudo and provider state",
+                "disable the Syn agent and automatic recovery timer",
+                "revoke Syn's restricted maintenance SSH key while preserving unrelated keys",
+                "remove the syn-approvals package while retaining protected keys and backups",
+            ];
+            if arguments.apply {
+                require_root()?;
+                let installed = package_is_installed("syn-approvals")?;
+                if arguments.state.exists() {
+                    installer::recover(&arguments.state, true)?;
+                } else if Path::new("/etc/sudoers.d/90-syn-managed-user").exists() {
+                    bail!("Syn appears armed but install state is missing; use console recovery");
+                } else {
+                    recovery_timer::cancel(true)?;
+                }
+                verify_local_sudo_recovered(&arguments.state)?;
+                if Path::new("/var/lib/syn/maintenance/config.json").try_exists()? {
+                    maintenance::revoke(true)?;
+                }
+                if installed {
+                    run_fixed(
+                        "/usr/bin/systemctl",
+                        &["disable", "--now", "syn-agent.service"],
+                    )?;
+                    run_fixed("/usr/bin/dpkg", &["--remove", "syn-approvals"])?;
+                    run_fixed("/usr/bin/systemctl", &["daemon-reload"])?;
+                }
+            }
+            output(
+                cli.json,
+                serde_json::json!({
+                    "applied": arguments.apply,
+                    "actions": actions,
+                    "retained": ["Syn pairing keys", "recovery helper", "sudo backups"],
+                }),
             )
         }
         TopLevel::Unpair(arguments) => {
@@ -494,6 +620,9 @@ fn run(cli: &Cli) -> Result<()> {
         TopLevel::Recovery { command } => match command {
             RecoveryCommand::Status => output(cli.json, recovery_timer::status()),
             RecoveryCommand::Arm { minutes, apply } => {
+                if *apply {
+                    recovery_timer::prepare_helper(&std::env::current_exe()?)?;
+                }
                 output(cli.json, recovery_timer::arm(*minutes, *apply)?)
             }
             RecoveryCommand::Cancel { apply } => {
@@ -506,6 +635,45 @@ fn run(cli: &Cli) -> Result<()> {
                 output(cli.json, recovery_timer::prove(*seconds, *apply)?)
             }
         },
+        TopLevel::Onboard { command } => match command {
+            OnboardCommand::Prepare {
+                request_sha256,
+                source_sha256,
+                apply,
+            } => output(
+                cli.json,
+                onboarding::prepare(request_sha256, source_sha256, *apply)?,
+            ),
+            OnboardCommand::Build {
+                operation_id,
+                apply,
+            } => output(cli.json, onboarding::build(operation_id, *apply)?),
+            OnboardCommand::Cleanup {
+                operation_id,
+                apply,
+            } => output(cli.json, onboarding::cleanup(operation_id, *apply)?),
+            OnboardCommand::Configure {
+                operation_id,
+                apply,
+            } => output(cli.json, onboarding::configure(operation_id, *apply)?),
+            OnboardCommand::Activate {
+                operation_id,
+                apply,
+            } => output(cli.json, onboarding::activate(operation_id, *apply)?),
+            OnboardCommand::Complete {
+                operation_id,
+                apply,
+            } => output(cli.json, onboarding::complete(operation_id, *apply)?),
+        },
+        TopLevel::Maintenance { command } => match command {
+            MaintenanceCommand::Install {
+                user,
+                public_key,
+                apply,
+            } => output(cli.json, maintenance::install(user, public_key, *apply)?),
+            MaintenanceCommand::Serve => maintenance::serve(),
+            MaintenanceCommand::Revoke { apply } => output(cli.json, maintenance::revoke(*apply)?),
+        },
     }
 }
 
@@ -517,6 +685,55 @@ where
         println!("{}", serde_json::to_string(&Envelope { ok: true, data })?);
     } else {
         println!("{data:#?}");
+    }
+    Ok(())
+}
+
+fn package_is_installed(package: &str) -> Result<bool> {
+    let output = Command::new("/usr/bin/dpkg-query")
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .current_dir("/")
+        .args(["--show", "--showformat=${db:Status-Abbrev}", package])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if output.status.success() {
+        return Ok(output.stderr.is_empty() && output.stdout == b"ii ");
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    bail!("unable to inspect package {package}")
+}
+
+fn verify_local_sudo_recovered(state: &Path) -> Result<()> {
+    if state.try_exists()? || Path::new("/etc/sudoers.d/90-syn-managed-user").try_exists()? {
+        bail!("ordinary password sudo recovery is incomplete");
+    }
+    let selected = fs::canonicalize("/usr/bin/sudo")?;
+    if let Ok(sudo_ws) = fs::canonicalize("/usr/bin/sudo.ws") {
+        if selected == sudo_ws {
+            bail!("ordinary sudo still selects the Syn-gated provider");
+        }
+    }
+    run_fixed("/usr/bin/sudo", &["-V"])?;
+    run_fixed("/usr/sbin/visudo", &["-cf", "/etc/sudoers"])
+}
+
+fn run_fixed(program: &str, arguments: &[&str]) -> Result<()> {
+    let status = Command::new(program)
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .current_dir("/")
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .status()?;
+    if !status.success() {
+        bail!("{program} failed with {status}");
     }
     Ok(())
 }
@@ -543,7 +760,7 @@ fn doctor(paths: &ConfigPaths) -> Result<DoctorReport> {
     let plugin_config = result_check(plugin.as_ref().map(|_| "valid"));
     let policy_check = result_check(policy.as_ref().map(|_| "valid"));
     let agent_socket = path_check(&agent_socket_path);
-    let overlay = overlay_check(&agent);
+    let network = network_check(&agent);
     let sudo_ws = command_check("sudo.ws", &["-V"]);
     let sudo_rs_provider = sudo_rs_check();
     let sudo_coupling = match installer::check_installed_coupling(Path::new(DEFAULT_INSTALL_STATE))
@@ -579,7 +796,7 @@ fn doctor(paths: &ConfigPaths) -> Result<DoctorReport> {
         && policy_check.status == "ok"
         && identity_coupling.status == "ok"
         && agent_socket.status == "ok"
-        && overlay.status == "ok"
+        && network.status == "ok"
         && sudo_ws.status == "ok"
         && sudo_rs_provider.status == "ok"
         && sudo_coupling.status == "ok"
@@ -595,7 +812,7 @@ fn doctor(paths: &ConfigPaths) -> Result<DoctorReport> {
         policy: policy_check,
         identity_coupling,
         agent_socket,
-        overlay,
+        network,
         sudo_ws,
         sudo_rs_provider,
         sudo_coupling,
@@ -699,21 +916,33 @@ fn coupling_check(
 }
 
 fn status(paths: &ConfigPaths) -> Result<StatusReport> {
-    let agent = AgentConfig::load(&paths.agent_config).ok();
-    let plugin = PluginConfig::load(&paths.plugin_config).ok();
+    let agent =
+        AgentConfig::load(&paths.agent_config).and_then(|config| config.validate().map(|_| config));
+    let plugin = PluginConfig::load(&paths.plugin_config)
+        .and_then(|config| config.validate().map(|_| config));
+    let configuration_state = configuration_state(agent.as_ref().err(), plugin.as_ref().err());
+    let configured = match configuration_state {
+        "unreadable" => None,
+        "configured" => Some(true),
+        _ => Some(false),
+    };
+    let agent = agent.ok();
+    let plugin = plugin.ok();
     let target_key_id = agent
         .as_ref()
         .and_then(|config| fs::read_to_string(&config.target_public_key).ok())
         .and_then(|pem| verifying_key_from_pem(&pem).ok())
         .map(|key| key_id_hex(&key));
     Ok(StatusReport {
-        configured: agent.is_some() && plugin.is_some(),
+        schema_version: 1,
+        configured,
+        configuration_state,
+        release_id: syn_protocol::release_id(),
+        release_commit: syn_protocol::release_commit(),
         target_id: agent.as_ref().map(|value| value.target_id.clone()),
         managed_user: plugin.as_ref().map(|value| value.managed_user.clone()),
         managed_uid: plugin.as_ref().map(|value| value.managed_uid),
         listen: agent.as_ref().map(|value| value.listen.clone()),
-        overlay: agent.as_ref().map(|value| value.overlay),
-        approver_ip: agent.as_ref().map(|value| value.approver_ip.to_string()),
         timeout_seconds: plugin.as_ref().map(|value| value.timeout_seconds),
         agent_socket: agent
             .as_ref()
@@ -722,29 +951,51 @@ fn status(paths: &ConfigPaths) -> Result<StatusReport> {
     })
 }
 
-fn overlay_check(agent: &std::result::Result<AgentConfig, syn_config::ConfigError>) -> Check {
+fn configuration_state(
+    agent: Option<&syn_config::ConfigError>,
+    plugin: Option<&syn_config::ConfigError>,
+) -> &'static str {
+    use syn_config::ConfigError;
+    let errors = [agent, plugin];
+    if errors.iter().flatten().any(|error| {
+        matches!(error, ConfigError::Read { source, .. }
+        if source.kind() != std::io::ErrorKind::NotFound)
+    }) {
+        return "unreadable";
+    }
+    if errors
+        .iter()
+        .flatten()
+        .any(|error| !matches!(error, ConfigError::Read { .. }))
+    {
+        return "invalid";
+    }
+    match (agent, plugin) {
+        (None, None) => "configured",
+        (Some(_), Some(_)) => "absent",
+        _ => "incomplete",
+    }
+}
+
+fn network_check(agent: &std::result::Result<AgentConfig, syn_config::ConfigError>) -> Check {
     let Ok(agent) = agent else {
         return Check {
             status: "missing_or_invalid",
-            detail: "valid agent configuration is required for overlay checks".into(),
+            detail: "valid agent configuration is required for network checks".into(),
         };
     };
-    let interface = agent.overlay.interface_name();
-    let interface_output = match Command::new("ip")
-        .args(["-j", "address", "show", "dev", interface])
-        .output()
-    {
+    let interface_output = match Command::new("ip").args(["-j", "address", "show"]).output() {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             return Check {
                 status: "error",
-                detail: format!("required interface {interface} exit={}", output.status),
+                detail: format!("local interface inspection exit={}", output.status),
             }
         }
         Err(error) => {
             return Check {
                 status: "missing",
-                detail: format!("unable to inspect interface {interface}: {error}"),
+                detail: format!("unable to inspect local interfaces: {error}"),
             }
         }
     };
@@ -757,31 +1008,35 @@ fn overlay_check(agent: &std::result::Result<AgentConfig, syn_config::ConfigErro
             }
         }
     };
-    if let Err(error) = agent.validate_interface_addresses(&addresses) {
+    if let Err(error) = agent.validate_selected_address(&addresses) {
         return Check {
             status: "invalid",
             detail: error.to_string(),
         };
     }
-    if !overlay_peer_is_visible(agent) {
-        return Check {
-            status: "peer_missing",
-            detail: format!(
-                "configured approver {} is not visible on {:?}",
-                agent.approver_ip, agent.overlay
-            ),
-        };
-    }
+    let listen_ip = match agent.listen_address() {
+        Ok(address) => address.ip(),
+        Err(error) => {
+            return Check {
+                status: "invalid",
+                detail: error.to_string(),
+            }
+        }
+    };
+    let interface = addresses
+        .iter()
+        .find_map(|(interface, address)| (*address == listen_ip).then_some(interface.as_str()))
+        .unwrap_or("unknown");
     Check {
         status: "ok",
         detail: format!(
-            "{:?} {} on {}; approver peer {} is visible and enforced",
-            agent.overlay, agent.listen, interface, agent.approver_ip
+            "{} is assigned to {}; remote peers still require the paired mTLS client certificate",
+            agent.listen, interface
         ),
     }
 }
 
-fn interface_addresses(json: &[u8]) -> Result<Vec<(String, std::net::IpAddr)>> {
+pub(crate) fn interface_addresses(json: &[u8]) -> Result<Vec<(String, std::net::IpAddr)>> {
     let reports: serde_json::Value = serde_json::from_slice(json)?;
     let reports = reports
         .as_array()
@@ -807,43 +1062,6 @@ fn interface_addresses(json: &[u8]) -> Result<Vec<(String, std::net::IpAddr)>> {
         }
     }
     Ok(addresses)
-}
-
-fn overlay_peer_is_visible(agent: &AgentConfig) -> bool {
-    match agent.overlay {
-        OverlayKind::NordMeshnet => Command::new("nordvpn")
-            .args(["meshnet", "peer", "list"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line.trim() == format!("IP: {}", agent.approver_ip))
-            })
-            .unwrap_or(false),
-        OverlayKind::Tailscale => Command::new("tailscale")
-            .args(["status", "--json"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-            .and_then(|status| status.get("Peer").cloned())
-            .and_then(|peers| peers.as_object().cloned())
-            .map(|peers| {
-                peers.values().any(|peer| {
-                    peer.get("TailscaleIPs")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|addresses| {
-                            addresses
-                                .iter()
-                                .filter_map(serde_json::Value::as_str)
-                                .any(|address| address == agent.approver_ip.to_string())
-                        })
-                })
-            })
-            .unwrap_or(false),
-    }
 }
 
 fn generate_target_keys(private: &Path, public: &Path) -> Result<()> {
@@ -1154,4 +1372,68 @@ pub(crate) fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<()
     fs::rename(&temporary, path)?;
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use std::io::ErrorKind;
+    use syn_config::ConfigError;
+
+    fn read_error(kind: ErrorKind) -> ConfigError {
+        ConfigError::Read {
+            path: PathBuf::from("/synthetic/config.toml"),
+            source: std::io::Error::from(kind),
+        }
+    }
+
+    #[test]
+    fn status_distinguishes_missing_partial_invalid_and_unreadable_configuration() {
+        let missing = read_error(ErrorKind::NotFound);
+        let denied = read_error(ErrorKind::PermissionDenied);
+        let invalid = ConfigError::Invalid("synthetic invalid configuration".into());
+        assert_eq!(configuration_state(None, None), "configured");
+        assert_eq!(
+            configuration_state(Some(&missing), Some(&missing)),
+            "absent"
+        );
+        assert_eq!(configuration_state(Some(&missing), None), "incomplete");
+        assert_eq!(configuration_state(None, Some(&missing)), "incomplete");
+        assert_eq!(configuration_state(Some(&invalid), None), "invalid");
+        assert_eq!(
+            configuration_state(Some(&missing), Some(&denied)),
+            "unreadable"
+        );
+        assert_eq!(
+            configuration_state(Some(&denied), Some(&invalid)),
+            "unreadable"
+        );
+    }
+
+    #[test]
+    fn absent_status_still_identifies_the_binary_release_without_claiming_configuration() {
+        let directory = std::env::temp_dir().join(format!(
+            "syn-absent-status-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        assert!(!directory.exists());
+        let report = status(&ConfigPaths {
+            agent_config: directory.join("agent.toml"),
+            plugin_config: directory.join("plugin.toml"),
+            policy: directory.join("policy.toml"),
+        })
+        .unwrap();
+        assert_eq!(report.schema_version, 1);
+        assert_eq!(report.configured, Some(false));
+        assert_eq!(report.configuration_state, "absent");
+        assert_eq!(report.release_id, syn_protocol::release_id());
+        assert_eq!(report.release_commit, syn_protocol::release_commit());
+        assert!(report.target_id.is_none());
+        assert!(report.managed_uid.is_none());
+        assert!(!directory.exists());
+    }
 }

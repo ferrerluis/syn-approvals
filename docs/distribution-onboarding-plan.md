@@ -4,13 +4,13 @@ Plan only — revised 2026-09-05 with the decisions from our conversation. This 
 
 ## 1. The experience we're building
 
-**The Mac is where you install, connect and update Syn.** You shouldn't need to run an installation command on Ubuntu.
+**The Mac is where you install, connect and update Syn.** First setup includes one command in a trusted administrator terminal on the remote machine; later updates stay in the Mac app.
 
 1. Download Syn from GitHub, put it in Applications and open it.
 2. Choose whether to start at login — **Yes (recommended)** or **No** — and allow notifications.
 3. Click **Add a machine**. Enter its hostname, SSH username and, if needed, SSH port.
-4. Syn checks access, asks you to confirm the machine's identity and obtains administrator authorization.
-5. Syn installs its matching remote component and exchanges pairing information over SSH. No copying keys, pairing links or certificates.
+4. Syn checks access and asks you to confirm the machine's identity. It gives you one command to run in a trusted remote administrator session, outside the agent's control, to authorize this Mac's restricted maintenance key.
+5. Click **I've run the command — continue**. Syn verifies that access, installs its matching remote component and exchanges pairing information over SSH. No manual key or certificate transfer.
 6. Complete the setup approval checks. Syn shows **Ready**, or explains what failed and how to retry.
 
 SSH access and an account with sudo permission are prerequisites. Explain them in README and check them before making changes. Start with Ubuntu 26.04 ARM64 and macOS 15+ on Apple Silicon; use “remote machine” in product copy, with Raspberry Pi 5 as our tested example.
@@ -26,6 +26,8 @@ Syn remembers the hostname you supplied. It resolves it when connecting and veri
 - If the hostname cannot be reached, show **Disconnected** and retry. Do not guess which network service to enable.
 
 Use the Mac's existing SSH configuration and agent where possible, including 1Password's SSH agent. Respect host-key verification, confirm new hosts and stop on changed identities. Do not forward the SSH agent, store remote passwords, or give Syn a general-purpose terminal interface. Installation uses fixed operations; usernames, hostnames and other inputs must never become executable shell text.
+
+The administrator runs the bootstrap in a trusted session once. It verifies a root-owned copy of the bundled helper and installs a separate restricted SSH key for Syn's fixed maintenance operations. Syn sends no administrator password over SSH. The machine must permit root public-key access with a forced command; Syn does not weaken its SSH policy. Local key revocation, recovery and uninstall remain available.
 
 ## 3. Versions and Mac-led updates
 

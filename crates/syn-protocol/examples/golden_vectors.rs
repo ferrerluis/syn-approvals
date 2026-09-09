@@ -52,8 +52,16 @@ fn main() {
         issued_at_unix_ms: 1_700_000_000_000,
         ttl_ms: syn_protocol::DEFAULT_TTL_MS,
         sudo: intent,
+        release_id: syn_protocol::DEVELOPMENT_RELEASE_ID.into(),
+        release_commit: syn_protocol::DEVELOPMENT_RELEASE_COMMIT.into(),
     };
     let signed_request = sign_request(&request, &target).unwrap();
+    let mut wrong_release = request.clone();
+    wrong_release.release_id = "20260905000001".into();
+    let signed_wrong_release = sign_request(&wrong_release, &target).unwrap();
+    let mut wrong_commit = request.clone();
+    wrong_commit.release_commit = "1111111111111111111111111111111111111111".into();
+    let signed_wrong_commit = sign_request(&wrong_commit, &target).unwrap();
     let verified = verify_request(&signed_request, target.verifying_key()).unwrap();
     let mut no_tty = request.clone();
     no_tty.sudo.tty = None;
@@ -77,6 +85,8 @@ fn main() {
         approval.verifying_key(),
     );
     approval_decision.decided_at_unix_ms = 1_700_000_001_000;
+    approval_decision.release_id = syn_protocol::DEVELOPMENT_RELEASE_ID.into();
+    approval_decision.release_commit = syn_protocol::DEVELOPMENT_RELEASE_COMMIT.into();
     let mut denial_decision = DecisionV1::for_request(
         &verified,
         DecisionAction::Deny,
@@ -84,6 +94,8 @@ fn main() {
         denial.verifying_key(),
     );
     denial_decision.decided_at_unix_ms = 1_700_000_001_001;
+    denial_decision.release_id = syn_protocol::DEVELOPMENT_RELEASE_ID.into();
+    denial_decision.release_commit = syn_protocol::DEVELOPMENT_RELEASE_COMMIT.into();
 
     let output = json!({
         "schema_version": 1,
@@ -91,6 +103,8 @@ fn main() {
         "approval_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(approval.verifying_key())),
         "denial_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(denial.verifying_key())),
         "signed_request_hex": hex::encode(signed_request),
+        "signed_wrong_release_request_hex": hex::encode(signed_wrong_release),
+        "signed_wrong_commit_request_hex": hex::encode(signed_wrong_commit),
         "signed_no_tty_request_hex": hex::encode(signed_no_tty),
         "signed_no_tty_noninteractive_request_hex": hex::encode(signed_no_tty_noninteractive),
         "legacy_30_second_request_hex": hex::encode(legacy_request),

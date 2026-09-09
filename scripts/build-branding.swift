@@ -3,12 +3,13 @@ import AppKit
 import Foundation
 
 guard CommandLine.arguments.count == 3 else {
-    fatalError("Usage: build-branding.swift COLOR_PNG OUTPUT.iconset")
+    fatalError("Usage: build-branding.swift APP_ICON_PNG OUTPUT.iconset")
 }
 let source = URL(fileURLWithPath: CommandLine.arguments[1])
 let destination = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+let dockArtInsetFraction: CGFloat = 0.08
 guard let logo = NSImage(contentsOf: source), logo.isValid else {
-    fatalError("Cannot decode the color logo")
+    fatalError("Cannot decode the app icon")
 }
 guard logo.representations.contains(where: { $0.pixelsWide >= 1024 && $0.pixelsHigh >= 1024 }) else {
     fatalError("App icon source must have at least 1024 physical pixels per side")
@@ -30,8 +31,9 @@ for points in [16, 32, 128, 256, 512] {
         let canvas = NSRect(x: 0, y: 0, width: pixels, height: pixels)
         NSColor.clear.setFill()
         canvas.fill(using: .copy)
-        // Preserve the transparent circular artwork, with consistent Dock padding.
-        let inset = CGFloat(pixels) * 0.08
+        // macOS supplies the external Dock shadow, but it does not normalize
+        // optical size. Keep the illustrated tile inside the standard canvas.
+        let inset = CGFloat(pixels) * dockArtInsetFraction
         logo.draw(in: canvas.insetBy(dx: inset, dy: inset))
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()

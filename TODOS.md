@@ -2,11 +2,11 @@
 
 Product direction: enable agents to perform administrator actions on a remote machine with human control from a Mac. Manual work over SSH or a remote-desktop terminal should remain convenient with local password authentication; Syn must not depend on the terminal or remote-desktop application being used.
 
-These are planned changes, not implemented features. The current alpha requests one Mac approval per eligible invocation by the configured account, waits up to 90 seconds, and permits password fallback only under its existing rules. The [UX map](docs/user-experience-map.md) distinguishes current behavior from this roadmap.
+TODO 1 now has a candidate implementation and automated component coverage, but it is not accepted or live-proven. Every TODO 1 checkbox stays open until the complete [12-case E2E suite](docs/onboarding-e2e-test-plan.md) passes; the [UX map](docs/user-experience-map.md) distinguishes implemented candidate behavior from accepted behavior.
 
 ## 1. Mac-led distribution, installation and updates
 
-Delivery plan: [Syn: simpler installation and updates](docs/distribution-onboarding-plan.md). This replaces the Ubuntu-first installer and pairing-link proposal. TODOs 3 and 4 are included; checkboxes remain open until implemented and tested.
+Delivery plan: [Syn: simpler installation and updates](docs/distribution-onboarding-plan.md). The Mac-led candidate replaces the old remote-first installer and manual pairing proposal. TODOs 3 and 4 are included; checkboxes remain open until the full live suite passes.
 
 ### 1.1 Download and release identity
 
@@ -20,7 +20,7 @@ Delivery plan: [Syn: simpler installation and updates](docs/distribution-onboard
 - [ ] Add **Add a machine**: hostname, SSH account/port, identity confirmation, access checks, administrator authorization, installation and pairing.
 - [ ] Require existing SSH access and sudo permission; check OS, architecture, prerequisites and available space before changes. Initially validate Ubuntu 26.04 ARM64 and Apple Silicon macOS 15+.
 - [ ] Reuse existing SSH configuration/agents where possible. Verify host keys, handle authentication securely, and avoid agent forwarding or stored remote passwords.
-- [ ] Transfer the verified matching source bundle from the Mac and build as the ordinary remote user. Request administrator access only for necessary dependencies and system changes.
+- [ ] Transfer the verified matching source bundle from the Mac and build as Syn's locked non-administrator build account. Request administrator access only for necessary dependencies and system changes.
 - [ ] Exchange pairing information through authenticated SSH. No user-run Ubuntu installation command, manual key copying, pairing URL or separate pairing server.
 - [ ] Preserve existing identities/settings, make retries safe, and distinguish **Connected** from **Ready**. Removing a Mac list entry must not imply that remote sudo has been restored.
 
@@ -45,10 +45,10 @@ Delivery plan: [Syn: simpler installation and updates](docs/distribution-onboard
 
 - [ ] README: Mac download → SSH/network prerequisites → Add a machine → first approval → password access → settings → update/recovery/uninstall. Use “remote machine”; keep Raspberry Pi 5 as a validated example.
 - [ ] Explain the 90-second wait, Enter-to-password, explicit denial, sleep/offline behavior, SSH/Keychain prompts and private-signing limits. Never tell users to disable Mac protections globally.
-- [ ] Use small Sol work packages and built-in Codex messages. Implementation agents test components; one dedicated final Sol agent owns the sequential E2E suite and all Computer Use/live Mac/Pi actions. The orchestrator reviews evidence and routes fixes without competing device use.
-- [ ] Complete the [12-case E2E checklist](docs/onboarding-e2e-test-plan.md): actual uninstall from both Mac and Pi, clean Mac-led reinstall, approvals/password escape, real LAN and hostname connections, matching-version upgrades, offline retry, and interrupted/reboot recovery. Keep exhaustive failure variants in automated component tests; group real authentication in the final coordinated window and finish with working installations on both devices.
+- [ ] Use small Sol work packages and built-in Codex messages. Implementation agents test components; one dedicated final Sol agent owns the sequential E2E suite and all Computer Use or live Mac/remote-machine actions. The orchestrator reviews evidence and routes fixes without competing device use.
+- [ ] Complete the [12-case E2E checklist](docs/onboarding-e2e-test-plan.md): actual uninstall from the Mac and remote machine, clean Mac-led reinstall, approvals/password escape, real LAN and hostname connections, matching-version upgrades, offline retry, and interrupted/reboot recovery. Keep exhaustive failure variants in automated component tests; group real authentication in the final coordinated window and finish with working installations on both devices. Use Raspberry Pi 5 as the tested remote-machine example, not as a requirement.
 
-Acceptance: the actual downloaded release completes Mac-led setup, pairing and updates on the Mac and Pi; only matching versions approve; interactive password access and failed-update recovery work; README matches the tested journey.
+Acceptance: the actual downloaded release completes Mac-led setup, pairing and updates on the Mac and tested remote machine; only matching versions approve; interactive password access and failed-update recovery work; README matches the tested journey.
 
 ## 2. Time-limited “Always approve” and activity history
 
@@ -69,6 +69,8 @@ Acceptance: after one authenticated opt-in, eligible requests in the selected sc
 
 Included in TODO 1 as core interactive behavior, not human/agent detection or an optional update-only mode. No separate-account routing work is planned.
 
+The Enter-to-password state machine and adversarial automated tests are implemented in the candidate. This remains unchecked until the live authentication, race, cancellation, and recovery cases pass.
+
 ### Press Enter to use the password now
 
 - [ ] Implement an interactive wait prompt: **“Waiting for Syn approval. Press Enter to use this machine's password instead.”** Pressing Enter once should leave the pending Mac-approval path and start the protected remote password prompt immediately, without the 90-second wait.
@@ -84,6 +86,8 @@ Acceptance: the supported manual-work path offers a password without an unwanted
 ## 4. First-launch startup preference
 
 Included in TODO 1's Mac onboarding delivery.
+
+The first-launch prompt, persisted choice, settings control, and component tests are implemented in the candidate. This remains unchecked until installed-app acceptance passes.
 
 - [ ] On first opening Syn, ask **“Start Syn automatically when you log in?”** with **Yes (recommended)** and **No**.
 - [ ] Explain the benefit: approval requests can reach this Mac without remembering to open Syn. It neither wakes a sleeping Mac nor approves requests automatically.
