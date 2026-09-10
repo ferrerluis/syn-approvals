@@ -21,15 +21,23 @@ install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-app-icon-light.png" "$res
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-app-icon-dark.png" "$resource_dir/"
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-menu-icon.svg" "$resource_dir/"
 
-# Build independent light/dark ICNS files from the smallest exports that exceed
-# macOS's 1024px maximum. The app switches its running Dock icon by appearance.
+# Let Xcode compile the supplied Icon Composer source. Assets.car retains the
+# light/dark Liquid Glass treatments; Syn.icns is the compatibility fallback.
 icon_work_dir=$(mktemp -d "${TMPDIR:-/tmp}/syn-icon.XXXXXX")
-swift "$repo_dir/scripts/build-branding.swift" \
-    "$repo_dir/assets/branding/light/syn-app-icon-light@2x.png" "$icon_work_dir/Syn.iconset"
-iconutil -c icns "$icon_work_dir/Syn.iconset" -o "$app_dir/Contents/Resources/Syn.icns"
-swift "$repo_dir/scripts/build-branding.swift" \
-    "$repo_dir/assets/branding/dark/syn-app-icon-dark@2x.png" "$icon_work_dir/Syn-dark.iconset"
-iconutil -c icns "$icon_work_dir/Syn-dark.iconset" -o "$app_dir/Contents/Resources/Syn-dark.icns"
+xcrun actool \
+    --compile "$icon_work_dir" \
+    --platform macosx \
+    --minimum-deployment-target 15.0 \
+    --app-icon Syn \
+    --output-partial-info-plist "$icon_work_dir/partial.plist" \
+    --warnings --errors --notices \
+    "$repo_dir/assets/branding/app-icon/Syn.icon"
+install -m 0644 "$icon_work_dir/Assets.car" "$app_dir/Contents/Resources/Assets.car"
+install -m 0644 "$icon_work_dir/Syn.icns" "$app_dir/Contents/Resources/Syn.icns"
+xcrun assetutil --info "$app_dir/Contents/Resources/Assets.car" > "$icon_work_dir/assets.json"
+grep -q '"Name" : "Syn"' "$icon_work_dir/assets.json"
+grep -q '"Appearance" : "NSAppearanceNameDarkAqua"' "$icon_work_dir/assets.json"
+grep -q '"PixelWidth" : 1024' "$icon_work_dir/assets.json"
 
 if [ -n "${SYN_CODESIGN_IDENTITY:-}" ]; then
     codesign --force --options runtime --timestamp --sign "$SYN_CODESIGN_IDENTITY" "$app_dir"
@@ -47,7 +55,6 @@ ditto "$app_dir/Contents/Resources" "$probe_app/Contents/Resources"
 swiftc -parse-as-library -swift-version 6 -warnings-as-errors \
     -target "$(uname -m)-apple-macosx15.0" \
     "$repo_dir/macos/Sources/Syn/Branding.swift" \
-    "$repo_dir/macos/Tests/SynTests/IconComparison.swift" \
     "$build_dir/release/Syn.build/DerivedSources/resource_bundle_accessor.swift" \
     "$repo_dir/scripts/verify-branding-package.swift" \
     -o "$probe_app/Contents/MacOS/Syn"

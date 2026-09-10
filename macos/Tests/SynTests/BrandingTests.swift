@@ -34,33 +34,6 @@ import Testing
   #expect(SynBranding.menuBarLogo.size.width != SynBranding.menuBarLogo.size.height)
 }
 
-@MainActor @Test func launchDelegateInstallsAppearanceAppropriateDockIcon() throws {
-  let app = NSApplication.shared
-  let previous = app.applicationIconImage
-  defer { app.applicationIconImage = previous }
-  SynAppDelegate().applicationDidFinishLaunching(
-    Notification(name: NSApplication.didFinishLaunchingNotification)
-  )
-  let installed = try #require(app.applicationIconImage)
-  #expect(installed.isValid)
-  #expect(!installed.isTemplate)
-  let expected = SynBranding.applicationIcon(for: app.effectiveAppearance)
-  #expect(matchingIconPixels(installed, expected))
-  // A generic placeholder, blank icon, or monochrome mark must not pass.
-  #expect(!matchingIconPixels(NSImage(size: NSSize(width: 64, height: 64)), expected))
-  #expect(!matchingIconPixels(SynBranding.menuBarLogo, expected))
-  let placeholder = try #require(NSImage(systemSymbolName: "app", accessibilityDescription: nil))
-  #expect(!matchingIconPixels(placeholder, expected))
-}
-
-@MainActor @Test func appIconHasDistinctLightAndDarkAppearances() throws {
-  let light = SynBranding.applicationIcon(for: try #require(NSAppearance(named: .aqua)))
-  let dark = SynBranding.applicationIcon(for: try #require(NSAppearance(named: .darkAqua)))
-  #expect(matchingIconPixels(light, SynBranding.lightLogo))
-  #expect(matchingIconPixels(dark, SynBranding.darkLogo))
-  #expect(!matchingIconPixels(light, dark))
-}
-
 @MainActor @Test func logosRenderWithTransparencyAndColor() throws {
   for (image, expectColor) in [
     (SynBranding.lightLogo, true), (SynBranding.darkLogo, true), (SynBranding.menuBarLogo, false),
