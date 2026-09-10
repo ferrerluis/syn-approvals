@@ -5,7 +5,7 @@ struct SynApp: App {
     @StateObject private var model = SynModel()
 
     var body: some Scene {
-        WindowGroup("Syn", id: "main") {
+        Window("Syn", id: "main") {
             SynContentView(model: model)
         }
         .defaultSize(width: 960, height: 680)

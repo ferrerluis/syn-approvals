@@ -1,9 +1,7 @@
-schema_version = 1
+schema_version = 2
 target_id = "pi-development"
-# Choose tailscale or nord_meshnet. Bind only to the matching overlay interface.
-overlay = "nord_meshnet"
-listen = "100.64.0.10:41781"
-approver_ip = "100.64.0.11"
+# Replace this with one exact address assigned to the target. Never use a wildcard.
+listen = "192.168.1.10:41781"
 unix_socket = "/run/syn/agent.sock"
 plugin_uid = 0
 max_pending = 16

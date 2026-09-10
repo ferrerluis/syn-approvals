@@ -1,8 +1,8 @@
-# Syn protocol v1
+# Syn protocol v2
 
-Status: private-alpha wire contract. Numeric map keys are part of the protocol.
+Status: implemented candidate wire contract with shared Rust/Swift golden vectors. Numeric map keys are part of the protocol; live Mac-led E2E acceptance is still pending.
 
-The current alpha requires a 90-second TTL. Earlier 30-second builds are incompatible and fail closed, even when their signatures are valid. Upgrade the target binaries/configuration and Mac app together while Syn is unarmed, then obtain fresh signed preflight evidence. The shared golden fixture includes a correctly signed legacy 30-second request that both implementations must reject.
+Version 2 requires a 90-second TTL and the exact compiled release ID and Git commit in the hello, signed request, and signed decision. Version 1 and mixed-release messages fail closed even when their signatures are otherwise valid.
 
 ## Encoding
 
@@ -15,13 +15,29 @@ The current alpha requires a 90-second TTL. Earlier 30-second builds are incompa
 - Receivers verify signatures over the received protected header and payload bytes before decoding trusted fields.
 - Decoded payloads are re-encoded and compared to reject non-canonical encodings.
 
-## Approval request
+## Hello and release binding
 
-`ApprovalRequestV1` is a CBOR map:
+Each direct mTLS connection starts with a canonical hello body:
 
 | Key | Field | Type |
 | --- | --- | --- |
-| 0 | protocol version | unsigned, must be 1 |
+| 0 | minimum protocol version | unsigned, exactly 2 |
+| 1 | maximum protocol version | unsigned, exactly 2 |
+| 2 | target ID | text, must match the pinned target |
+| 3 | release ID | 14-digit compact UTC timestamp |
+| 4 | release commit | 40 lowercase hexadecimal characters |
+
+Both peers require the target ID, protocol range, release ID, and release commit to match their local pinned or compiled values. A mismatch is **Update required**; there is no downgrade, dynamic schema download, or signature-only compatibility exception.
+
+The all-zero development release ID and commit are reserved for debug builds. Release builds must receive valid identity metadata at compile time.
+
+## Approval request
+
+The Rust type remains named `ApprovalRequestV1`, but its wire `protocol_version` is 2. The CBOR map is:
+
+| Key | Field | Type |
+| --- | --- | --- |
+| 0 | protocol version | unsigned, must be 2 |
 | 1 | request ID | 16-byte bstr |
 | 2 | nonce | 32-byte bstr |
 | 3 | target ID | text |
@@ -29,8 +45,10 @@ The current alpha requires a 90-second TTL. Earlier 30-second builds are incompa
 | 5 | adapter kind | text, initially `org.syn-approvals.sudo` |
 | 6 | adapter schema | unsigned, initially 1 |
 | 7 | issued at | signed Unix milliseconds, display only |
-| 8 | TTL | exactly 90000 milliseconds in the alpha |
+| 8 | TTL | exactly 90000 milliseconds |
 | 9 | sudo intent | `SudoIntentV1` map |
+| 10 | release ID | exact compiled release ID |
+| 11 | release commit | exact compiled Git commit |
 
 `SudoIntentV1` binds:
 
@@ -48,14 +66,9 @@ The current alpha requires a 90-second TTL. Earlier 30-second builds are incompa
 - policy version and sudo provider;
 - typed risk markers.
 
-Byte strings are intentional. Unix argv and paths are not required to be valid UTF-8.
+Byte strings are intentional because Unix argv and paths need not be valid UTF-8.
 
-The sudo map has twenty required keys (0–20 except 5). Key 5 is the optional
-TTY string: Rust/minicbor omits it when no terminal exists. It is not encoded
-as null. Receivers accept exactly the required set, with or without this one
-optional text field; unknown fields and missing required fields fail closed.
-Golden fixtures cover both non-interactive flag values with an absent TTY,
-which is common for Codex command execution without a PTY.
+The sudo map has twenty required keys (0–20 except 5). Key 5 is the optional TTY string and is omitted, not encoded as null, when no terminal exists. Unknown fields and missing required fields fail closed; golden fixtures cover an absent TTY for both interactive-flag values.
 
 ## Decision
 
@@ -63,7 +76,7 @@ which is common for Codex command execution without a PTY.
 
 | Key | Field | Type |
 | --- | --- | --- |
-| 0 | protocol version | unsigned, must be 1 |
+| 0 | protocol version | unsigned, must be 2 |
 | 1 | request ID | 16-byte bstr |
 | 2 | request payload hash | 32-byte bstr |
 | 3 | target ID | text |
@@ -71,12 +84,14 @@ which is common for Codex command execution without a PTY.
 | 5 | decided at | signed Unix milliseconds, diagnostic only |
 | 6 | approver key ID | 32-byte bstr |
 | 7 | authentication class | 1 = system user presence, 2 = device authenticated |
+| 8 | release ID | approver's exact compiled release ID |
+| 9 | release commit | approver's exact compiled Git commit |
 
-An approval must use authentication class 1 and the Secure Enclave approval key. A denial must use class 2 and the paired device-decision key. Other combinations fail closed.
+An approval must use authentication class 1 and the Secure Enclave approval key. A denial must use class 2 and the paired device-decision key. The decision must match the request ID, payload hash, target ID, release ID, and release commit; other combinations fail closed.
 
 ## Transport messages
 
-Every WebSocket binary frame contains a canonical `WireMessageV1` map:
+Every WebSocket binary frame contains a canonical `WireMessageV1` map whose wire protocol version is 2:
 
 | Key | Field |
 | --- | --- |
@@ -84,28 +99,32 @@ Every WebSocket binary frame contains a canonical `WireMessageV1` map:
 | 1 | message kind |
 | 2 | body bstr |
 
-Kinds are hello, request, cancel, decision, result, ping, pong, and error. Frames larger than 64 KiB are rejected.
+Kinds are hello, request, cancel, decision, result, ping, pong, error, and unavailable. Frames larger than 64 KiB are rejected.
 
-The root plug-in uses the same message envelope over a Unix stream prefixed by a four-byte network-order length. Only request, cancel, decision, and unavailable/error messages are valid locally.
+The root plug-in uses the same envelope over a Unix stream prefixed by a four-byte network-order length. Only request, cancel, decision, and unavailable/error messages are valid locally. The unprivileged relay can verify and relay messages but has no command-execution API and never holds the target authorization private key.
 
 ## State machine
 
 ```text
 created -> target-signed -> relayed -> pending
-pending -> approved -> verified -> executed
-pending -> denied -> verified -> rejected
-pending -> expired -> interactive PAM fallback | non-interactive rejection
-pending -> cancelled -> rejected
+pending -> approved -> verified -> original invocation executes
+pending -> denied -> verified -> hard rejection
+pending -> Enter on an interactive terminal -> cancel pending request -> PAM password
+pending -> unavailable/expired -> interactive PAM password | non-interactive rejection
+pending -> cancelled -> rejection
 any integrity/protocol/policy error -> hard rejection
 ```
 
-The target plug-in owns the monotonic deadline. Neither the agent nor the Mac can extend it with wall-clock values.
+The target plug-in owns one monotonic deadline covering connection, writes, frame headers, frame bodies, and decision verification. Partial progress cannot restart or extend it.
 
-The plug-in uses that same absolute deadline for local-socket connection, writes, frame headers, and frame bodies. Partial progress does not restart the wait. A complete decision is signature- and binding-checked before expiry handling: an invalid decision or signed denial never opens password fallback. A valid but late approval cannot authorize execution; only the existing expiry fallback may proceed. Truncated frames are malformed, while an empty disconnect is ordinary unavailability.
+Enter is accepted only as an empty line from the controlling interactive terminal while the request remains pending. The plug-in cancels that request before PAM begins, and a late approval cannot authorize the current or a later invocation. Redirected input, explicit denial, invalid decisions, local policy failures, and non-interactive use cannot select password fallback.
+
+A complete decision is signature- and binding-checked before expiry handling. Truncated frames are malformed; an empty disconnect is ordinary unavailability.
 
 ## Compatibility
 
-- A new optional field requires a new schema version unless every v1 decoder can safely ignore it.
+- A schema change requires a new protocol version unless every supported decoder can safely ignore it.
 - Unknown adapter kinds or schemas cannot be rendered or approved.
-- Protocol negotiation may select only a version implemented by both endpoints.
+- The current hello requires exactly version 2; it does not negotiate with version 1.
+- The Mac and all remote binaries must share the exact release ID and commit before approvals resume.
 - There is no dynamic schema or renderer download.

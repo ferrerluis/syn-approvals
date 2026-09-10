@@ -1,34 +1,32 @@
 # Implementation status
 
-This repository is a compiling security-alpha foundation, not a reviewed or deployable release. The distinction matters because successful compilation does not prove a sudo ABI, PAM conversation, Secure Enclave policy, installer recovery path, or package upgrade on the actual Ubuntu ARM64 target.
+As of September 9, 2026, Syn is an onboarding candidate. The current flow has not passed the required [12-case live suite](onboarding-e2e-test-plan.md).
 
-## Delivered
+## Current candidate
 
-**Current validation (2026-09-04):** the approval window is 90 seconds throughout source, fixtures, examples, specifications, and deployed builds. All checks pass (37 local Rust, 47 Pi Rust, 25 Swift). Phases 9–10 passed, including live expiry/PAM fallback, native Codex's package reinstall, armed reboot with an unchanged rollback deadline, post-reboot recovery, guarded reinstallation, healthy-Syn rollback cancellation, and a final permanent-state approval. A real no-terminal parser defect was reproduced, fixed, and revalidated through native Codex. Syn is installed in Applications with launch at login enabled. A historical pre-commit Mac build's TLS callback isolation crash has also been reproduced from its report, hardened in source, and exercised through three signed-app reconnect cycles without recurrence. The 30-second results below are historical. [Current validation ledger](validation/2026-09-04-phases-9-10.md); [TLS crash regression](validation/2026-09-04-tls-isolation-crash.md).
+- The Mac app's **Add a machine** flow accepts a reachable hostname, SSH account and optional port. It discovers the remote endpoint, checks Ubuntu 26.04 ARM64, transfers inert inputs and runs only fixed privileged operations.
+- Bootstrap copies the incoming helper into a root-owned directory, verifies its exact digest and size there, then executes that protected copy. The helper also checks its path, parents, open executable and compiled release identity.
+- First setup now includes one command in a trusted remote administrator session. It installs a restricted maintenance SSH key; the Mac no longer collects or sends administrator passwords. Later updates reuse that key, and local revocation removes its exact entry.
+- Onboarding is split into resumable `prepare`, `cleanup`, `build`, `configure`, `activate` and `complete` phases. `recover` removes `NOPASSWD` before restoring or removing other state.
+- Successful setup leaves the Mac app talking directly to the remote machine over mutually authenticated TLS. Everyday approvals do not use an SSH tunnel, cloud relay or VPN-provider dependency.
+- The wire protocol is version 2. Hello, request and decision messages bind the target, release ID and exact release commit; mixed releases fail closed before an approval is accepted.
+- Each approval is limited to one signed invocation and expires after 90 seconds. An interactive user may press Enter to cancel the pending remote approval and use ordinary password sudo; denial and integrity failures do not fall back.
+- Candidate update, interrupted-operation recovery, uninstall and login-startup paths exist. Completion requires a fresh approval and an exact live release/coupling check before recovery protection is canceled.
 
-- **Iteration 0, live validated:** explicit Nord Meshnet/Tailscale selection, exact local-interface and approver-address checks, a reboot-persistent recovery deadline, and one exact 30-second approval TTL. [Evidence and remaining limits](validation/2026-09-03-iteration-0.md).
-- **Validation Phases 1–2 passed:** committed source baseline, refreshed local checks, current Pi inventory, root-only sudo-state backup, verified recovery timer, and retained root access through the acceptance gate. The timer was canceled after the gate; sudo remains unchanged. [Evidence](validation/2026-09-04-phases-1-2.md).
-- **Validation Phases 3–4 passed:** clean native ARM64 build with system PAM development files, 29 Pi tests, explicit audited runtime dependencies, package reinstallation, and before/after authentication-state comparisons. Fresh ordinary password sudo passed; Syn remains unarmed. [Evidence](validation/2026-09-04-phases-3-4.md).
-- **Validation Phase 5 passed:** real synthetic Touch ID approvals, explicit denial, actual authentication cancellation, notification privacy/Review reopening, and stable signed-app restart without repeated Keychain permission. [Evidence](validation/2026-09-04-phases-5-6-progress.md).
-- **Validation Phase 6 passed:** final-build Mac approval executed the original real sudo invocation as root. Denial, Ctrl-C, malformed replies, 30-second non-interactive expiry, interactive PAM fallback, relay reconnection, and actual timed shadow recovery also passed on Ubuntu 26.04.1 ARM64. The original sudo/PAM/provider state is restored; fresh ordinary password sudo passed. Current checks pass 31 local Rust, 39 native Pi Rust, and 23 Swift tests. No passwordless rule was created. [Evidence](validation/2026-09-04-phases-5-6-progress.md).
-- **Validation Phase 7 passed:** guarded normal installation, exact single-user rule/global plug-in/provider coupling, alternate-provider denial, ordinary-sudo Mac approval, actual automatic normal recovery, and reinstallation with a fresh approved healthy diagnostic passed. Latest checks: 35 local Rust, 43 native Pi Rust, and 23 Swift tests. Syn is armed at handoff with rollback scheduled for 2026-09-04 15:41:11 UTC; this is temporary validation state, not permanent enablement. [Evidence](validation/2026-09-04-phase-7.md).
-- **Validation Phase 8 passed:** all armed-mode authentication matrix rows passed, including fresh repeat/concurrent approvals, actual system cancellation, Mac login-password approval, timeout/PAM behavior, alternate-provider denial, live malformed replies, and missing-plug-in failure. Each fault was restored and followed by a new ordinary-sudo approval. The denial notice explains retry; expanded signed-intent mismatch tests pass. Latest checks: 35 local Rust, 45 native Pi Rust, and 23 Swift tests. Doctor was healthy at 2026-09-04 16:06:04 UTC; rollback remains scheduled for 16:18:20 UTC. [Evidence and scope](validation/2026-09-04-phase-8.md).
-- **Design authority:** threat model, protocol, privacy rules, ADRs, recovery procedure, and adversarial test matrix.
-- **Protocol:** deterministic CBOR, COSE Sign1 ES256, typed sudo intent, exact request/decision binding, size limits, and shared Rust/Swift golden vectors.
-- **Relay:** root-only local socket input, target-signature verification, in-memory pending queue, cancellation, mutual TLS 1.3, binary WebSocket messages, exact approver keys, deadlines, and no command execution surface.
-- **sudo.ws plug-in source:** final argv/environment capture, duplicate and size checks, root-owned request signing, independent decision verification, local shell/interpreter policy, monotonic timeout, and dedicated PAM fallback.
-- **Mac app source:** menu bar, pinned TLS, Keychain client identity, local notifications, safe byte/Unicode rendering, Secure Enclave `userPresence` approval, software denial key, and one-request decisions.
-- **Lifecycle tooling:** diagnostics, target and approver key staging, profile generation, signed harmless-command preflight, guarded install ordering, recovery, systemd/PAM assets, and ARM64 Debian package assembly.
+## Evidence available
 
-## Not yet proven or complete
+- Historical September 5–6 component runs passed Swift, Rust ARM64, release-tool, privacy and formatting/lint checks. Those results are recorded in the [onboarding checkpoint](validation/2026-09-05-onboarding-implementation.md); they predate some current integration changes and are not a current-HEAD acceptance claim.
+- Earlier live Pi validation exercised the core sudo/PAM, mutual-TLS approval and timed-recovery design. It did not exercise the current Mac-led download, protected bootstrap, phased install, update or uninstall flow.
+- Current source contains focused automated tests for release binding, onboarding state and retry behavior, protected-source checks, recovery ordering and Mac coordinator decisions. The full current-HEAD check matrix still needs to be recorded with the live suite.
 
-- Phases 9–10 passed. Syn and both sudo-provider reinstalls preserved enforcement and keys; no newer provider versions were available, so a newer-version upgrade is not claimed. Syn is intentionally enabled without the temporary timer after the required recovery/fallback gates and successful healthy-Syn cancellation. [Current evidence](validation/2026-09-04-phases-9-10.md).
-- Armed-mode missing and damaged plug-in failures passed. A permission-specific unreadable-file failure and every interrupted-install boundary have not been separately fault-injected.
-- Pairing uses a manually transferred, root-approved profile and transport identity. The planned QR/custom-URL `/v1/pair` exchange is not implemented end to end.
-- Fresh Secure Enclave approval with Touch ID and system cancellation passed in earlier phases; the Mac login-password path also passed in armed mode. Automatic dismissal of an untouched expired authentication prompt still needs dedicated live evidence.
-- The Debian package is installed on Ubuntu 26.04 ARM64. Actual shadow and normal-install timed recovery passed; interruption at every passwordless-install phase remains untested.
-- No Developer ID signing, notarization, SBOM, reproducible-build proof, independent review, sudo-rs RFC, or 1Password research run has occurred.
+## Not yet proven
+
+- Cases E01–E12 have not run against the current Mac-led flow. No first install, A-to-B update, interruption boundary, recovery or uninstall is accepted until that ledger passes.
+- Real private-release download authorization and genuine A/B artifacts still need end-to-end evidence. A private repository cannot be treated as an anonymous public download source.
+- Mac artifacts are ad-hoc signed for development. There is no Developer ID distribution, notarization, reproducible-build proof, SBOM or independent security review.
+- Linux activation recovery now uses a root-owned worker lease and process identity checks. Its behavior across real interrupted updates and reboot remains an E10 acceptance requirement.
+- Package/provider upgrades to a genuinely newer external version and every damaged or unreadable-file boundary have not been live fault-injected.
 
 ## Release state
 
-Do not run `synctl install --apply` until the existing Pi has a proven local timed rollback and preserved root path. Follow the [live Pi validation plan](live-pi-validation-plan.md); spare hardware is not required.
+Do not call the Mac-led milestone complete or deploy it to an ordinary machine yet. Run the [12-case live suite](onboarding-e2e-test-plan.md) with independent recovery access, record exact release IDs and commits, and leave both machines in a verified final state.

@@ -78,7 +78,8 @@ enum LocalResponse {
 
 impl Agent {
     pub async fn from_config(config: AgentConfig) -> Result<Self> {
-        verify_overlay_interface(&config)?;
+        config.validate()?;
+        verify_selected_address(&config)?;
         let target_key = read_verifying_key(&config.target_public_key)?;
         let approval_key = read_verifying_key(&config.approval_public_key)?;
         let denial_key = read_verifying_key(&config.denial_public_key)?;
@@ -103,8 +104,8 @@ impl Agent {
         let unix_listener = bind_unix_socket(&self.config.unix_socket).await?;
         let tcp_listener = TcpListener::bind(&self.config.listen)
             .await
-            .with_context(|| format!("unable to bind overlay listener {}", self.config.listen))?;
-        info!(overlay = ?self.config.overlay, listen = %self.config.listen, socket = %self.config.unix_socket.display(), "Syn agent ready");
+            .with_context(|| format!("unable to bind network listener {}", self.config.listen))?;
+        info!(listen = %self.config.listen, socket = %self.config.unix_socket.display(), "Syn agent ready");
 
         let unix_state = self.state.clone();
         let plugin_uid = self.config.plugin_uid;
@@ -124,15 +125,12 @@ impl Agent {
 
         let network_state = self.state.clone();
         let acceptor = self.tls_acceptor.clone();
-        let approver_ip = self.config.approver_ip;
         let network_task = tokio::spawn(async move {
             let slots = Arc::new(Semaphore::new(MAX_APPROVER_CONNECTIONS));
             loop {
                 let (stream, peer) = tcp_listener.accept().await?;
-                if !peer_ip_is_allowed(approver_ip, peer.ip()) {
-                    warn!(%peer, expected_ip = %approver_ip, "unconfigured overlay peer rejected");
-                    continue;
-                }
+                // Source addresses may change across private networks. The TLS acceptor below
+                // still requires a client certificate issued by the configured paired CA.
                 let Ok(slot) = slots.clone().try_acquire_owned() else {
                     warn!(%peer, "approver connection limit reached");
                     continue;
@@ -171,17 +169,16 @@ struct InterfaceAddress {
     local: String,
 }
 
-fn verify_overlay_interface(config: &AgentConfig) -> Result<()> {
-    let interface = config.overlay.interface_name();
+fn verify_selected_address(config: &AgentConfig) -> Result<()> {
     let output = Command::new("ip")
-        .args(["-j", "address", "show", "dev", interface])
+        .args(["-j", "address", "show"])
         .output()
-        .with_context(|| format!("unable to inspect required overlay interface {interface}"))?;
+        .context("unable to inspect local interface addresses")?;
     if !output.status.success() {
-        bail!("required overlay interface {interface} is unavailable");
+        bail!("unable to inspect local interface addresses");
     }
     let addresses = parse_interface_addresses(&output.stdout)?;
-    config.validate_interface_addresses(&addresses)?;
+    config.validate_selected_address(&addresses)?;
     Ok(())
 }
 
@@ -197,10 +194,6 @@ fn parse_interface_addresses(json: &[u8]) -> Result<Vec<(String, std::net::IpAdd
         }
     }
     Ok(addresses)
-}
-
-fn peer_ip_is_allowed(expected: std::net::IpAddr, actual: std::net::IpAddr) -> bool {
-    expected == actual
 }
 
 async fn bind_unix_socket(path: &Path) -> Result<UnixListener> {
@@ -263,6 +256,16 @@ async fn handle_local(
             &mut stream,
             "wrong_target",
             "request target does not match this agent",
+        )
+        .await;
+    }
+    if verified.request.release_id != syn_protocol::release_id()
+        || verified.request.release_commit != syn_protocol::release_commit()
+    {
+        return write_hard_error(
+            &mut stream,
+            "release_mismatch",
+            "request and relay releases do not match",
         )
         .await;
     }
@@ -363,6 +366,14 @@ async fn write_hard_error(stream: &mut UnixStream, code: &str, message: &str) ->
     write_frame(stream, &wire).await
 }
 
+fn hello_matches_local(hello: &HelloV1, target_id: &str) -> bool {
+    hello.minimum_version <= PROTOCOL_VERSION
+        && hello.maximum_version >= PROTOCOL_VERSION
+        && hello.target_id == target_id
+        && hello.release_id == syn_protocol::release_id()
+        && hello.release_commit == syn_protocol::release_commit()
+}
+
 async fn handle_network(
     stream: tokio::net::TcpStream,
     state: Arc<AgentState>,
@@ -386,6 +397,8 @@ async fn handle_network(
         minimum_version: PROTOCOL_VERSION,
         maximum_version: PROTOCOL_VERSION,
         target_id: state.target_id.clone(),
+        release_id: syn_protocol::release_id().into(),
+        release_commit: syn_protocol::release_commit().into(),
     };
     send_wire(
         &mut websocket,
@@ -405,11 +418,8 @@ async fn handle_network(
         bail!("approver did not begin with a hello message");
     }
     let client_hello: HelloV1 = syn_protocol::decode_canonical(client_hello.body.as_slice())?;
-    if client_hello.minimum_version > PROTOCOL_VERSION
-        || client_hello.maximum_version < PROTOCOL_VERSION
-        || client_hello.target_id != state.target_id
-    {
-        bail!("approver and target have no compatible protocol version");
+    if !hello_matches_local(&client_hello, &state.target_id) {
+        bail!("approver and target protocol, identity, or release do not match");
     }
 
     let snapshot: Vec<Vec<u8>> = {
@@ -500,6 +510,11 @@ async fn route_decision(signed: &[u8], state: &AgentState) -> Result<()> {
         Err(_) => verify_decision(signed, &state.denial_key)?,
     };
     validate_decision_key_class(&verified, state)?;
+    if verified.decision.release_id != syn_protocol::release_id()
+        || verified.decision.release_commit != syn_protocol::release_commit()
+    {
+        bail!("decision and relay releases do not match");
+    }
     let request_id = hex::encode(verified.decision.request_id.as_slice());
     let pending = {
         let mut requests = state.pending.lock().await;
@@ -636,6 +651,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hello_requires_the_exact_target_and_release() {
+        let hello = HelloV1 {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+            target_id: "remote-one".into(),
+            release_id: syn_protocol::release_id().into(),
+            release_commit: syn_protocol::release_commit().into(),
+        };
+        assert!(hello_matches_local(&hello, "remote-one"));
+
+        let mut wrong_release = hello.clone();
+        wrong_release.release_id = "20260908000000".into();
+        assert!(!hello_matches_local(&wrong_release, "remote-one"));
+
+        let mut wrong_commit = hello;
+        wrong_commit.release_commit = "f".repeat(40);
+        assert!(!hello_matches_local(&wrong_commit, "remote-one"));
+    }
+
     use super::*;
     use syn_protocol::{
         digest_environment, generate_signing_key, sign_decision, sign_request, ApprovalRequestV1,
@@ -724,24 +759,125 @@ mod tests {
         assert!(route_decision(&signed, &state).await.is_err());
     }
 
+    #[tokio::test]
+    async fn local_requester_disconnect_removes_pending_and_broadcasts_cancel() {
+        let target = generate_signing_key();
+        let request = ApprovalRequestV1::new("pi-dev".into(), target.verifying_key(), intent());
+        let request_id = request.request_id.to_vec();
+        let signed = sign_request(&request, &target).unwrap();
+        let (event_tx, mut event_rx) = broadcast::channel(4);
+        let state = Arc::new(AgentState {
+            target_id: "pi-dev".into(),
+            target_key: *target.verifying_key(),
+            approval_key: *generate_signing_key().verifying_key(),
+            denial_key: *generate_signing_key().verifying_key(),
+            max_pending: 4,
+            pending: Mutex::new(HashMap::new()),
+            event_tx,
+        });
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let plugin_uid = server.peer_cred().unwrap().uid();
+        let task = tokio::spawn(handle_local(server, state.clone(), plugin_uid));
+        let wire = WireMessageV1::new(message_kind::REQUEST, signed)
+            .unwrap()
+            .encode()
+            .unwrap();
+        write_frame(&mut client, &wire).await.unwrap();
+
+        let request_event = event_rx.recv().await.unwrap();
+        assert_eq!(request_event.kind, message_kind::REQUEST);
+        assert_eq!(state.pending.lock().await.len(), 1);
+        drop(client);
+        task.await.unwrap().unwrap();
+
+        let cancel_event = event_rx.recv().await.unwrap();
+        assert_eq!(cancel_event.kind, message_kind::CANCEL);
+        let cancel: CancelV1 = syn_protocol::decode_canonical(&cancel_event.body).unwrap();
+        assert_eq!(cancel.request_id.as_slice(), request_id);
+        assert!(state.pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_relay_rejects_other_releases_signed_by_the_same_target() {
+        for change_commit in [false, true] {
+            let target = generate_signing_key();
+            let approver = generate_signing_key();
+            let (event_tx, mut event_rx) = broadcast::channel(4);
+            let state = Arc::new(AgentState {
+                target_id: "pi-dev".into(),
+                target_key: *target.verifying_key(),
+                approval_key: *approver.verifying_key(),
+                denial_key: *generate_signing_key().verifying_key(),
+                max_pending: 4,
+                pending: Mutex::new(HashMap::new()),
+                event_tx,
+            });
+            let mut request =
+                ApprovalRequestV1::new("pi-dev".into(), target.verifying_key(), intent());
+            if change_commit {
+                request.release_commit = if syn_protocol::release_commit() == "1".repeat(40) {
+                    "2".repeat(40)
+                } else {
+                    "1".repeat(40)
+                };
+            } else {
+                request.release_id = if syn_protocol::release_id() == "20260906000001" {
+                    "20260906000002".into()
+                } else {
+                    "20260906000001".into()
+                };
+            }
+            let signed = sign_request(&request, &target).unwrap();
+            // The key is still trusted; this is a build-identity failure, not a
+            // forged-signature test. Reject before notifying or adding a waiter.
+            assert!(verify_request(&signed, target.verifying_key()).is_ok());
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let plugin_uid = server.peer_cred().unwrap().uid();
+            let task = tokio::spawn(handle_local(server, state.clone(), plugin_uid));
+            let wire = WireMessageV1::new(message_kind::REQUEST, signed)
+                .unwrap()
+                .encode()
+                .unwrap();
+            write_frame(&mut client, &wire).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut client))
+                .await
+                .unwrap()
+                .unwrap();
+            let reply = WireMessageV1::decode(&reply).unwrap();
+            assert_eq!(reply.kind, message_kind::ERROR);
+            assert_eq!(
+                reply.body.as_slice(),
+                encode_canonical(&ErrorV1 {
+                    code: "release_mismatch".into(),
+                    message: "request and relay releases do not match".into(),
+                })
+                .unwrap()
+            );
+            task.await.unwrap().unwrap();
+            assert!(state.pending.lock().await.is_empty());
+            assert!(matches!(
+                event_rx.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
     #[test]
-    fn interface_report_and_peer_are_exact() {
+    fn interface_report_collects_addresses_without_provider_assumptions() {
         let addresses = parse_interface_addresses(
-            br#"[{"ifname":"nordlynx","addr_info":[{"local":"100.99.102.171"}]}]"#,
+            br#"[
+                {"ifname":"enp1s0","addr_info":[{"local":"192.168.50.12"}]},
+                {"ifname":"private0","addr_info":[{"local":"fd00::12"},{"local":"invalid"}]}
+            ]"#,
         )
         .unwrap();
         assert_eq!(
             addresses,
-            vec![("nordlynx".into(), "100.99.102.171".parse().unwrap())]
+            vec![
+                ("enp1s0".into(), "192.168.50.12".parse().unwrap()),
+                ("private0".into(), "fd00::12".parse().unwrap()),
+            ]
         );
-        assert!(peer_ip_is_allowed(
-            "100.70.150.245".parse().unwrap(),
-            "100.70.150.245".parse().unwrap()
-        ));
-        assert!(!peer_ip_is_allowed(
-            "100.70.150.245".parse().unwrap(),
-            "100.70.150.246".parse().unwrap()
-        ));
     }
 
     #[test]

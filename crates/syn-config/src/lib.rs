@@ -13,6 +13,7 @@ pub const DEFAULT_PAIRING_STATE: &str = "/var/lib/syn/pairing.json";
 pub const DEFAULT_SOCKET_PATH: &str = "/run/syn/agent.sock";
 pub const DEFAULT_LISTEN_PORT: u16 = 41_781;
 pub const APPROVAL_TIMEOUT_SECONDS: u64 = 90;
+pub const AGENT_CONFIG_SCHEMA_VERSION: u16 = 2;
 pub const INSTALL_STATE_SCHEMA_VERSION: u16 = 2;
 pub const SUDO_SECURE_PATH: &str =
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin";
@@ -21,29 +22,6 @@ pub const SUDO_SECURE_PATH: &str =
 pub const SUDO_ENV_KEEP: &str =
     "DISPLAY XAUTHORITY DEBIAN_FRONTEND DEBIAN_PRIORITY NEEDRESTART_MODE";
 pub const SUDO_ENV_CHECK: &str = "COLORTERM LANG LANGUAGE TERM LC_ALL LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OverlayKind {
-    Tailscale,
-    NordMeshnet,
-}
-
-impl OverlayKind {
-    pub fn interface_name(self) -> &'static str {
-        match self {
-            Self::Tailscale => "tailscale0",
-            Self::NordMeshnet => "nordlynx",
-        }
-    }
-
-    pub fn accepts_address(self, address: IpAddr) -> bool {
-        match self {
-            Self::Tailscale => is_cgnat_ipv4(address) || is_tailscale_ipv6(address),
-            Self::NordMeshnet => is_cgnat_ipv4(address),
-        }
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -66,9 +44,7 @@ pub enum ConfigError {
 pub struct AgentConfig {
     pub schema_version: u16,
     pub target_id: String,
-    pub overlay: OverlayKind,
     pub listen: String,
-    pub approver_ip: IpAddr,
     #[serde(default = "default_socket")]
     pub unix_socket: PathBuf,
     #[serde(default = "default_plugin_uid")]
@@ -85,30 +61,29 @@ pub struct AgentConfig {
 
 impl AgentConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        load_toml(path)
+        let path = path.as_ref();
+        let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        parse_agent_config(path, &contents)
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.schema_version != 1 {
-            return Err(ConfigError::Invalid(
-                "unsupported agent schema version".into(),
-            ));
+        if self.schema_version != AGENT_CONFIG_SCHEMA_VERSION {
+            return Err(ConfigError::Invalid(format!(
+                "unsupported agent schema version {}; expected {AGENT_CONFIG_SCHEMA_VERSION}",
+                self.schema_version
+            )));
         }
         if self.target_id.is_empty() || self.target_id.len() > 128 {
             return Err(ConfigError::Invalid("invalid target ID".into()));
         }
         let listen = self.listen_address()?;
-        if listen.port() == 0 || !self.overlay.accepts_address(listen.ip()) {
+        if listen.port() == 0 || !is_safe_listen_address(listen.ip()) {
             return Err(ConfigError::Invalid(
-                "listen address is not valid for the configured private overlay".into(),
-            ));
-        }
-        if !self.overlay.accepts_address(self.approver_ip)
-            || self.approver_ip == listen.ip()
-            || self.approver_ip.is_ipv4() != listen.ip().is_ipv4()
-        {
-            return Err(ConfigError::Invalid(
-                "approver IP is not a distinct peer on the configured private overlay".into(),
+                "listen must use a non-wildcard, non-loopback, unicast address and a nonzero port"
+                    .into(),
             ));
         }
         if !(1..=64).contains(&self.max_pending) {
@@ -136,27 +111,47 @@ impl AgentConfig {
 
     pub fn listen_address(&self) -> Result<SocketAddr, ConfigError> {
         self.listen.parse::<SocketAddr>().map_err(|_| {
-            ConfigError::Invalid("listen must be a concrete overlay IP and port".into())
+            ConfigError::Invalid("listen must be one concrete IP address and port".into())
         })
     }
 
-    pub fn validate_interface_addresses(
+    pub fn validate_selected_address(
         &self,
         addresses: &[(String, IpAddr)],
     ) -> Result<(), ConfigError> {
         let listen_ip = self.listen_address()?.ip();
-        let expected = self.overlay.interface_name();
-        if addresses
-            .iter()
-            .any(|(interface, address)| interface == expected && *address == listen_ip)
-        {
+        if addresses.iter().any(|(_, address)| *address == listen_ip) {
             Ok(())
         } else {
             Err(ConfigError::Invalid(format!(
-                "listen IP {listen_ip} is not assigned to required interface {expected}"
+                "listen IP {listen_ip} is not assigned to any local interface"
             )))
         }
     }
+}
+
+fn parse_agent_config(path: &Path, contents: &str) -> Result<AgentConfig, ConfigError> {
+    let value: toml::Value = toml::from_str(contents).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let table = value.as_table();
+    let uses_legacy_network_fields = table
+        .is_some_and(|table| table.contains_key("overlay") || table.contains_key("approver_ip"));
+    let is_legacy_schema = value
+        .get("schema_version")
+        .and_then(toml::Value::as_integer)
+        == Some(1);
+    if is_legacy_schema || uses_legacy_network_fields {
+        return Err(ConfigError::Invalid(
+            "legacy provider-bound agent configuration is not accepted; guided setup must write schema_version = 2 with one explicit listen address and without overlay or approver_ip"
+                .into(),
+        ));
+    }
+    toml::from_str(contents).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -353,20 +348,11 @@ fn default_socket() -> PathBuf {
     DEFAULT_SOCKET_PATH.into()
 }
 
-fn is_cgnat_ipv4(address: IpAddr) -> bool {
-    let IpAddr::V4(address) = address else {
-        return false;
-    };
-    let octets = address.octets();
-    octets[0] == 100 && (64..=127).contains(&octets[1])
-}
-
-fn is_tailscale_ipv6(address: IpAddr) -> bool {
-    let IpAddr::V6(address) = address else {
-        return false;
-    };
-    let segments = address.segments();
-    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+fn is_safe_listen_address(address: IpAddr) -> bool {
+    !address.is_unspecified()
+        && !address.is_loopback()
+        && !address.is_multicast()
+        && address != IpAddr::V4(std::net::Ipv4Addr::BROADCAST)
 }
 
 fn default_plugin_uid() -> u32 {
@@ -454,23 +440,11 @@ mod tests {
         assert!(plugin.validate().is_err());
     }
 
-    #[test]
-    fn overlay_ranges_are_narrow() {
-        assert!(OverlayKind::NordMeshnet.accepts_address("100.64.0.1".parse().unwrap()));
-        assert!(OverlayKind::NordMeshnet.accepts_address("100.127.255.254".parse().unwrap()));
-        assert!(!OverlayKind::NordMeshnet.accepts_address("fd7a:115c:a1e0::1".parse().unwrap()));
-        assert!(OverlayKind::Tailscale.accepts_address("fd7a:115c:a1e0::1".parse().unwrap()));
-        assert!(!OverlayKind::Tailscale.accepts_address("0.0.0.0".parse().unwrap()));
-        assert!(!OverlayKind::NordMeshnet.accepts_address("192.168.1.2".parse().unwrap()));
-    }
-
-    fn agent_config(overlay: OverlayKind, listen: &str, approver_ip: &str) -> AgentConfig {
+    fn agent_config(listen: &str) -> AgentConfig {
         AgentConfig {
-            schema_version: 1,
+            schema_version: AGENT_CONFIG_SCHEMA_VERSION,
             target_id: "pi-development".into(),
-            overlay,
             listen: listen.into(),
-            approver_ip: approver_ip.parse().unwrap(),
             unix_socket: DEFAULT_SOCKET_PATH.into(),
             plugin_uid: 0,
             max_pending: 16,
@@ -484,39 +458,65 @@ mod tests {
     }
 
     #[test]
-    fn nord_config_requires_nord_interface_and_distinct_peer() {
-        let config = agent_config(
-            OverlayKind::NordMeshnet,
-            "100.99.102.171:41781",
-            "100.70.150.245",
-        );
+    fn selected_address_accepts_lan_and_provider_independent_interfaces() {
+        let config = agent_config("192.168.50.12:41781");
         config.validate().unwrap();
         config
-            .validate_interface_addresses(&[("nordlynx".into(), "100.99.102.171".parse().unwrap())])
+            .validate_selected_address(&[("enp1s0".into(), "192.168.50.12".parse().unwrap())])
+            .unwrap();
+        config
+            .validate_selected_address(&[(
+                "future-private-network0".into(),
+                "192.168.50.12".parse().unwrap(),
+            )])
             .unwrap();
         assert!(config
-            .validate_interface_addresses(&[(
-                "tailscale0".into(),
-                "100.99.102.171".parse().unwrap()
-            )])
+            .validate_selected_address(&[("enp1s0".into(), "192.168.50.13".parse().unwrap())])
             .is_err());
-
-        let same_peer = agent_config(
-            OverlayKind::NordMeshnet,
-            "100.99.102.171:41781",
-            "100.99.102.171",
-        );
-        assert!(same_peer.validate().is_err());
     }
 
     #[test]
-    fn overlay_config_rejects_wildcard_loopback_and_lan() {
-        for listen in ["0.0.0.0:41781", "127.0.0.1:41781", "192.168.1.2:41781"] {
+    fn selected_address_rejects_unsafe_listener_classes() {
+        for listen in [
+            "0.0.0.0:41781",
+            "[::]:41781",
+            "127.0.0.1:41781",
+            "224.0.0.1:41781",
+            "[ff02::1]:41781",
+            "255.255.255.255:41781",
+            "192.168.1.2:0",
+        ] {
             assert!(
-                agent_config(OverlayKind::NordMeshnet, listen, "100.70.150.245")
-                    .validate()
-                    .is_err()
+                agent_config(listen).validate().is_err(),
+                "accepted {listen}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_provider_bound_agent_config_is_rejected_explicitly() {
+        let error = parse_agent_config(
+            Path::new("agent.toml"),
+            r#"
+schema_version = 1
+target_id = "pi-development"
+overlay = "nord_meshnet"
+listen = "100.64.0.10:41781"
+approver_ip = "100.64.0.11"
+"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("legacy provider-bound"));
+        assert!(error.to_string().contains("schema_version = 2"));
+    }
+
+    #[test]
+    fn packaged_agent_example_uses_current_schema() {
+        let config = parse_agent_config(
+            Path::new("agent.toml"),
+            include_str!("../../../packaging/examples/agent.toml"),
+        )
+        .unwrap();
+        config.validate().unwrap();
     }
 }

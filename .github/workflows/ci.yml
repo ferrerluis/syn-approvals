@@ -8,34 +8,285 @@ on:
 permissions:
   contents: read
 
+# Main releases must finish in order. A rerun of an older commit is still
+# rejected by the published-release comparison below.
+concurrency:
+  group: syn-ci-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  release-metadata:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Create one deterministic release identity for every component
+        run: |
+          set -eu
+          release_epoch=$(git show -s --format=%ct HEAD)
+          collision_count=$(git log --format=%ct | awk -v wanted="$release_epoch" '$0 == wanted { count += 1 } END { print count + 0 }')
+          if [ "$collision_count" -ne 1 ]; then
+            printf '%s\n' 'commit timestamp collides with another release identity; amend it before publishing' >&2
+            exit 1
+          fi
+          release_id=$(date -u -d "@$release_epoch" +%Y%m%d%H%M%S)
+          mkdir -p "$RUNNER_TEMP/release"
+          python3 scripts/release-tool.py create \
+            --release-id "$release_id" \
+            --commit "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/release/release.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release/release.json
+          if-no-files-found: error
+
   rust:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # 1.85.0
         with:
           components: rustfmt, clippy
           targets: aarch64-unknown-linux-gnu
       - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev
       - run: cargo fmt --all -- --check
-      - run: cargo run --quiet --locked -p syn-protocol --example golden_vectors > /tmp/protocol-v1.json
-      - run: cmp tests/fixtures/protocol-v1.json /tmp/protocol-v1.json
-      - run: cmp tests/fixtures/protocol-v1.json macos/Tests/SynTests/Fixtures/protocol-v1.json
+      - run: cargo run --quiet --locked -p syn-protocol --example golden_vectors > /tmp/protocol-v2.json
+      - run: cmp tests/fixtures/protocol-v2.json /tmp/protocol-v2.json
+      - run: cmp tests/fixtures/protocol-v2.json macos/Tests/SynTests/Fixtures/protocol-v2.json
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p syn-sudo-plugin --target aarch64-unknown-linux-gnu --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: python3 scripts/test-log-privacy.py
+      - run: python3 -m unittest scripts/tests/test_release_tool.py
+
+  ubuntu-arm-release:
+    needs: [release-metadata, rust]
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@3230091d7ef9483f601620abacc570c22cf44d22 # 1.85.0
+        with:
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y libpam0g-dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-metadata
+          path: ${{ runner.temp }}/release
+      - name: Create exact offline source bundle
+        run: |
+          set -eu
+          release_dir="$RUNNER_TEMP/release"
+          release_id=$(python3 scripts/release-tool.py get --metadata "$release_dir/release.json" --field release_id)
+          ./scripts/package-release-source.sh "$PWD" "$release_dir/release.json" "$release_dir"
+          python3 scripts/release-tool.py create-remote-source \
+            --metadata "$release_dir/release.json" \
+            --artifact "$release_dir/syn-remote-source-${release_id}.tar.gz" \
+            --output "$release_dir/remote-source.json"
+          python3 scripts/release-tool.py verify-source-archive \
+            --metadata "$release_dir/release.json" \
+            --remote-source "$release_dir/remote-source.json" \
+            --artifact "$release_dir/syn-remote-source-${release_id}.tar.gz"
+      - name: Build matching Debian package from extracted bundle without network
+        run: |
+          set -eu
+          release_dir="$RUNNER_TEMP/release"
+          release_id=$(python3 scripts/release-tool.py get --metadata "$release_dir/release.json" --field release_id)
+          extract_dir="$RUNNER_TEMP/extracted"
+          package_dir="$RUNNER_TEMP/package"
+          mkdir -p "$extract_dir" "$package_dir"
+          tar -xzf "$release_dir/syn-remote-source-${release_id}.tar.gz" -C "$extract_dir"
+          source_root="$extract_dir/syn-remote-source-${release_id}"
+          SYN_RELEASE_METADATA="$source_root/release/release.json" \
+            "$source_root/scripts/build-deb.sh" "$package_dir"
+          package="$package_dir/syn-approvals_${release_id}_arm64.deb"
+          test "$(dpkg-deb -f "$package" Version)" = "$release_id"
+          dpkg-deb -x "$package" "$RUNNER_TEMP/package-root"
+          cmp "$source_root/release/release.json" "$RUNNER_TEMP/package-root/usr/share/syn/release.json"
+          helper="$release_dir/synctl-arm64-${release_id}"
+          install -m 0555 "$source_root/target/release/synctl" "$helper"
+          python3 scripts/verify-linux-helper.py --binary "$helper" --metadata "$release_dir/release.json"
+          python3 scripts/release-tool.py create-remote-helper \
+            --metadata "$release_dir/release.json" \
+            --artifact "$helper" \
+            --output "$release_dir/remote-helper.json"
+          python3 scripts/release-tool.py validate-remote-helper \
+            --metadata "$release_dir/release.json" \
+            --remote-helper "$release_dir/remote-helper.json" \
+            --artifact "$helper"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: remote-release
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
 
   macos:
+    needs: [ubuntu-arm-release]
     # Icon Composer's asset runtime requires the matching macOS 26 host.
     runs-on: macos-26
     env:
       # Pin the Swift 6.2 and Icon Composer toolchain used by release builds.
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: remote-release
+          path: ${{ runner.temp }}/release
       - run: xcodebuild -version && swift --version
       - run: swift test --package-path macos -Xswiftc -warnings-as-errors
       - name: Package app with bundled logos and native icon
-        run: ./scripts/build-macos-app.sh "$RUNNER_TEMP/syn-branding-smoke"
+        run: |
+          set -eu
+          release_dir="$RUNNER_TEMP/release"
+          release_id=$(python3 scripts/release-tool.py get --metadata "$release_dir/release.json" --field release_id)
+          mac_build_count=$(git rev-list --count HEAD)
+          if [ "$mac_build_count" -gt 9999 ]; then
+            printf '%s\n' 'Mac build count exceeds the current bundle-version mapping' >&2
+            exit 1
+          fi
+          SYN_RELEASE_METADATA="$release_dir/release.json" \
+          SYN_REMOTE_SOURCE_METADATA="$release_dir/remote-source.json" \
+          SYN_REMOTE_SOURCE_ARCHIVE="$release_dir/syn-remote-source-${release_id}.tar.gz" \
+          SYN_REMOTE_HELPER_METADATA="$release_dir/remote-helper.json" \
+          SYN_REMOTE_HELPER_BINARY="$release_dir/synctl-arm64-${release_id}" \
+          SYN_MAC_BUILD_NUMBER="${mac_build_count}.0.0" \
+            ./scripts/build-macos-app.sh "$RUNNER_TEMP/syn-branding-smoke"
+          SYN_ALLOW_ADHOC_PACKAGE_TEST=1 ./scripts/package-macos-release.sh \
+            "$RUNNER_TEMP/syn-branding-smoke/Syn.app" \
+            "$release_dir/release.json" \
+            "$release_dir/syn-remote-source-${release_id}.tar.gz" \
+            "$release_dir/synctl-arm64-${release_id}" \
+            "$release_dir"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mac-release
+          path: ${{ runner.temp }}/release/Syn-macOS-*.zip
+          if-no-files-found: error
+
+  publish-experimental:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: remote-release
+          path: ${{ runner.temp }}/release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mac-release
+          path: ${{ runner.temp }}/release
+      - name: Publish immutable matching Mac and remote release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          release_dir="$RUNNER_TEMP/release"
+          release_id=$(python3 scripts/release-tool.py get --metadata "$release_dir/release.json" --field release_id)
+          tag="experimental-$(git rev-parse HEAD)"
+          python3 scripts/release-tool.py create-index \
+            --metadata "$release_dir/release.json" \
+            --remote-source "$release_dir/remote-source.json" \
+            --source "$release_dir/syn-remote-source-${release_id}.tar.gz" \
+            --mac "$release_dir/Syn-macOS-${release_id}.zip" \
+            --output "$release_dir/release-index.json"
+          python3 scripts/release-tool.py verify-index \
+            --metadata "$release_dir/release.json" \
+            --index "$release_dir/release-index.json" \
+            --source "$release_dir/syn-remote-source-${release_id}.tar.gz" \
+            --mac "$release_dir/Syn-macOS-${release_id}.zip"
+          python3 scripts/release-tool.py create-channel \
+            --metadata "$release_dir/release.json" \
+            --index "$release_dir/release-index.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-tag "$tag" \
+            --output "$release_dir/latest-experimental.json"
+
+          published_root=$(mktemp -d)
+          trap 'rm -rf "$published_root"' EXIT HUP INT TERM
+          latest_tag=
+          if latest_tag=$(gh release view --json tagName --jq .tagName 2>/dev/null); then
+            latest_dir="$published_root/latest"
+            mkdir -p "$latest_dir"
+            gh release download "$latest_tag" --dir "$latest_dir" --pattern release.json
+            if [ "$latest_tag" != "$tag" ]; then
+              python3 scripts/release-tool.py require-newer \
+                --candidate "$release_dir/release.json" \
+                --previous "$latest_dir/release.json"
+            fi
+          else
+            release_count=$(gh release list --limit 1 --json tagName --jq 'length')
+            if [ "$release_count" -ne 0 ]; then
+              printf '%s\n' 'cannot determine the published latest release safely' >&2
+              exit 1
+            fi
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            existing_dir="$published_root/existing"
+            mkdir -p "$existing_dir"
+            remote_target=$(git ls-remote --tags origin \
+              "refs/tags/$tag" "refs/tags/$tag^{}" | \
+              awk '$2 ~ /\^\{\}$/ { peeled=$1; next } { direct=$1 } END { print peeled != "" ? peeled : direct }')
+            if [ "$remote_target" != "$GITHUB_SHA" ]; then
+              printf '%s\n' 'existing release tag does not point to this exact commit' >&2
+              exit 1
+            fi
+            for asset in \
+              "Syn-macOS-${release_id}.zip" \
+              "Syn-macOS-latest-experimental.zip" \
+              "syn-remote-source-${release_id}.tar.gz" \
+              remote-source.json release.json release-index.json latest-experimental.json
+            do
+              gh release download "$tag" --dir "$existing_dir" --pattern "$asset"
+              test -f "$existing_dir/$asset"
+            done
+            cmp "$release_dir/release.json" "$existing_dir/release.json"
+            cmp "$existing_dir/Syn-macOS-${release_id}.zip" \
+              "$existing_dir/Syn-macOS-latest-experimental.zip"
+            python3 scripts/release-tool.py verify-source-archive \
+              --metadata "$existing_dir/release.json" \
+              --remote-source "$existing_dir/remote-source.json" \
+              --artifact "$existing_dir/syn-remote-source-${release_id}.tar.gz"
+            python3 scripts/release-tool.py verify-index \
+              --metadata "$existing_dir/release.json" \
+              --index "$existing_dir/release-index.json" \
+              --source "$existing_dir/syn-remote-source-${release_id}.tar.gz" \
+              --mac "$existing_dir/Syn-macOS-${release_id}.zip"
+            python3 scripts/release-tool.py create-channel \
+              --metadata "$existing_dir/release.json" \
+              --index "$existing_dir/release-index.json" \
+              --repository "$GITHUB_REPOSITORY" \
+              --release-tag "$tag" \
+              --output "$existing_dir/expected-channel.json"
+            cmp "$existing_dir/expected-channel.json" "$existing_dir/latest-experimental.json"
+            if [ "$latest_tag" != "$tag" ]; then
+              gh release edit "$tag" --latest
+            fi
+            exit 0
+          fi
+          # Keep the immutable, release-ID-bearing artifact and add one stable
+          # filename for README's /releases/latest/download/ link. The bytes
+          # are identical; release.json inside the app remains authoritative.
+          cp "$release_dir/Syn-macOS-${release_id}.zip" \
+            "$release_dir/Syn-macOS-latest-experimental.zip"
+          gh release create "$tag" \
+            "$release_dir/Syn-macOS-${release_id}.zip" \
+            "$release_dir/Syn-macOS-latest-experimental.zip" \
+            "$release_dir/syn-remote-source-${release_id}.tar.gz" \
+            "$release_dir/remote-source.json" \
+            "$release_dir/release.json" \
+            "$release_dir/release-index.json" \
+            "$release_dir/latest-experimental.json" \
+            --target "$GITHUB_SHA" --latest \
+            --title "Syn experimental ${release_id}" \
+            --notes "Experimental, security-sensitive Syn build ${release_id}. This Mac app is ad-hoc signed, not notarized, and does not let macOS authenticate Syn's publisher; opening it may require a manual security override. It has not been independently reviewed. The app contains the exact matching remote component."

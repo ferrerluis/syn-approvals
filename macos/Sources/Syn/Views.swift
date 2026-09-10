@@ -20,7 +20,7 @@ struct SynMenuView: View {
             }
         }
         Divider()
-        Text("\(model.connectedTargets.count) of \(model.targets.count) targets connected")
+        Text("\(model.connectedTargets.count) of \(model.targets.count) machines connected")
         Button("Open Syn") {
             openWindow(id: "main")
             NSApp.activate(ignoringOtherApps: true)
@@ -48,7 +48,7 @@ struct SynContentView: View {
                             .tag(request.id)
                         }
                     }
-                    Section("Targets") {
+                    Section("Machines") {
                         ForEach(model.targets) { target in
                             HStack {
                                 Circle()
@@ -72,6 +72,26 @@ struct SynContentView: View {
         }
         .frame(minWidth: 840, minHeight: 580)
         .onAppear { model.openMainWindow = { openWindow(id: "main") } }
+        .sheet(isPresented: $model.showStartupPrompt, onDismiss: {
+            model.dismissStartupPrompt()
+        }) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Start Syn automatically when you log in?").font(.title2.bold())
+                Text("Keep Syn available to receive approval requests without remembering to open it.")
+                if let error = model.lastError {
+                    Text(error).foregroundStyle(.red)
+                }
+                HStack {
+                    Button("Not now") { model.dismissStartupPrompt() }
+                    Spacer()
+                    Button("No") { model.setLaunchAtLogin(false) }
+                    Button("Yes (recommended)") { model.setLaunchAtLogin(true) }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(24)
+            .frame(width: 440)
+        }
         .alert("Syn", isPresented: Binding(
             get: { model.lastError != nil },
             set: { if !$0 { model.lastError = nil } }
@@ -97,9 +117,9 @@ private struct ApprovalDetailView: View {
                         Text("Approval requested").font(.largeTitle.bold())
                     }
                     Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
-                        row("Target", model.target(for: request)?.displayName ?? request.targetID)
-                        row("Target ID", request.targetID)
-                        row("Target fingerprint", model.target(for: request)?.publicKey.map {
+                        row("Machine", model.target(for: request)?.displayName ?? request.targetID)
+                        row("Machine ID", request.targetID)
+                        row("Machine fingerprint", model.target(for: request)?.publicKey.map {
                             Data(SHA256.hash(data: $0.x963Representation)).hex
                         } ?? "Unavailable")
                         row("Request", request.id)
@@ -168,37 +188,83 @@ private struct SetupView: View {
 
     var body: some View {
         Form {
-            Section("Mac approver identities") {
-                Text("The approval private key remains in the Secure Enclave. Only these public identities are copied to the Pi.")
+            Section("Add a machine") {
+                Text("Syn uses your existing SSH setup to check the machine. Installation and everyday approvals do not require an SSH terminal to remain open.")
                     .foregroundStyle(.secondary)
-                Text( model.approverIdentityText)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                HStack {
-                    Button(model.preparingKeys ? "Preparing keys…" : "Prepare keys") { model.generateApproverIdentities() }
-                        .disabled(model.preparingKeys)
-                    Button("Copy public identities") { model.copyApproverIdentities() }
-                        .disabled(!model.keysReady)
-                }
-                Text(model.keysReady ? "Keys ready. Each approval still requires fresh system authentication." : "Preparing keys may show setup-time Keychain permissions. No command approval countdown is running.")
+                TextField("Hostname", text: $model.addMachineHostname)
+                    .textContentType(.URL)
+                TextField("SSH account", text: $model.addMachineUsername)
+                    .textContentType(.username)
+                TextField("SSH port (optional)", text: $model.addMachinePort)
+                    .frame(maxWidth: 220)
+                Text("SSH sign-in uses your existing OpenSSH agent and strict saved host verification. Syn never stores an SSH password.")
                     .font(.callout).foregroundStyle(.secondary)
+                HStack {
+                    Button(model.addMachineState == .checking ? "Checking…" : "Check connection") {
+                        model.checkMachineForSetup()
+                    }
+                    .disabled(model.addMachineState == .checking)
+                    if model.addMachineState == .checking {
+                        Button("Cancel") { model.cancelMachineCheck() }
+                    }
+                }
+                switch model.addMachineState {
+                case .idle:
+                    EmptyView()
+                case .checking:
+                    Label("Checking SSH access and Ubuntu compatibility…", systemImage: "progress.indicator")
+                case .readyToInstall:
+                    Label("Compatible remote machine found. Syn is not installed yet.", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                    setupAuthorization
+                case .updateRequired:
+                    Label("An older Syn installation was found. Update required.", systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.orange)
+                    setupAuthorization
+                case let .confirmHost(candidate):
+                    Label("Confirm SSH host identity", systemImage: "key.horizontal")
+                        .foregroundStyle(.orange)
+                    Text("\(candidate.settings.hostname):\(candidate.port)")
+                        .font(.headline)
+                    ForEach(candidate.records, id: \.fingerprint) { record in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(record.algorithm).font(.caption)
+                            Text(record.fingerprint)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text("Compare these fingerprints with the machine owner before trusting them. Syn saves only the confirmed keys in its private host file.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    HStack {
+                        Button("Trust this host") { model.trustPendingSSHHost() }
+                        Button("Cancel", role: .cancel) { model.cancelHostConfirmation() }
+                    }
+                case let .installing(progress):
+                    Label(progress.rawValue, systemImage: "progress.indicator")
+                    Button("Cancel setup") {
+                        model.cancelMachineCheck()
+                    }
+                case let .installed(releaseID, configuration):
+                    Label("Syn \(releaseID) is already installed (\(configuration)).", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                case let .failed(message):
+                    Label(message, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                }
             }
-            Section("Pair a target") {
-                Text("Import the root-approved JSON profile produced during pairing. Syn rejects plain ws:// endpoints, invalid target keys, and malformed certificate pins.")
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $model.pairingProfileText)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 150)
-                Button("Import paired target") { model.importTargetProfile() }
-                    .disabled(model.pairingProfileText.isEmpty)
-            }
-            Section("Targets") {
+            Section("Machines") {
                 ForEach(model.targets) { target in
                     VStack(alignment: .leading) {
                         HStack {
                             Text(target.displayName)
                             Spacer()
-                            if !model.connectedTargets.contains(target.targetID) {
+                            if model.updateRequiredTargets.contains(target.targetID) {
+                                Label("Update required", systemImage: "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(.orange)
+                                Button("Update") { model.updateMachine(target) }
+                                    .disabled(target.ssh == nil)
+                            } else if !model.connectedTargets.contains(target.targetID) {
                                 Button("Retry connection") { model.retryConnection(target) }
                                     .disabled(!model.keysReady)
                             }
@@ -222,5 +288,24 @@ private struct SetupView: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    @ViewBuilder
+    private var setupAuthorization: some View {
+        if let command = model.maintenanceBootstrapCommand {
+            Text("One-time setup on this machine").font(.headline)
+            Text("Run this command in a trusted administrator terminal on the remote machine. Use a session that your agents cannot control. Enter the machine's password there if asked.")
+                .font(.callout)
+            Text(command).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            Button("Copy setup command") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(command, forType: .string)
+            }
+            Text("This authorizes this Mac to install and update Syn through a restricted SSH key. Future updates stay in Syn; your administrator password is never sent by the app.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+        Button(model.maintenanceBootstrapCommand == nil ? "Install or update Syn" : "I've run the command — continue") {
+            model.installCheckedMachine()
+        }
     }
 }

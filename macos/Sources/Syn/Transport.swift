@@ -56,9 +56,24 @@ final class TargetConnection {
 
     func start() {
         guard connection == nil else { return }
-        guard target.webSocketURL.scheme == "wss", let hostname = target.webSocketURL.host,
-              let identity = Self.identity(label: target.clientIdentityLabel),
-              let localIdentity = sec_identity_create(identity) else {
+        guard target.webSocketURL.scheme == "wss", let hostname = target.webSocketURL.host else {
+            onMessage(.failure(TransportError.missingClientIdentity(target.clientIdentityLabel)))
+            return
+        }
+        let identity: SecIdentity
+        do {
+            guard let resolved = try MacTransportIdentityBackend.connectionIdentity(
+                label: target.clientIdentityLabel
+            ) else {
+                onMessage(.failure(TransportError.missingClientIdentity(target.clientIdentityLabel)))
+                return
+            }
+            identity = resolved
+        } catch {
+            onMessage(.failure(error))
+            return
+        }
+        guard let localIdentity = sec_identity_create(identity) else {
             onMessage(.failure(TransportError.missingClientIdentity(target.clientIdentityLabel)))
             return
         }
@@ -205,32 +220,6 @@ final class TargetConnection {
             && SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess
             && SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, hostname as CFString)) == errSecSuccess
             && SecTrustEvaluateWithError(trust, nil)
-    }
-
-    private static func identity(label: String) -> SecIdentity? {
-        // Identity queries do not reliably honor kSecAttrLabel on macOS.
-        // Resolve the labeled certificate first, then its exact matching key.
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassCertificate,
-            kSecAttrLabel: label,
-            kSecMatchLimit: kSecMatchLimitOne,
-            kSecReturnRef: true,
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        guard let result, CFGetTypeID(result) == SecCertificateGetTypeID() else { return nil }
-        let certificate = result as! SecCertificate
-        var commonName: CFString?
-        guard SecCertificateCopyCommonName(certificate, &commonName) == errSecSuccess,
-              commonName as String? == label else { return nil }
-        var identity: SecIdentity?
-        guard SecIdentityCreateWithCertificate(nil, certificate, &identity) == errSecSuccess,
-              let identity else { return nil }
-        var identityCertificate: SecCertificate?
-        guard SecIdentityCopyCertificate(identity, &identityCertificate) == errSecSuccess,
-              let identityCertificate,
-              SecCertificateCopyData(identityCertificate) as Data == SecCertificateCopyData(certificate) as Data else { return nil }
-        return identity
     }
 
     nonisolated private static func constantTimeEqual(_ left: String, _ right: String) -> Bool {

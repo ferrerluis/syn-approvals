@@ -7,7 +7,7 @@ Status: design authority for the private alpha.
 For one configured Linux UID, an invocation already accepted by sudoers must not execute unless either:
 
 1. the paired Mac produces a fresh, valid, request-bound approval signature; or
-2. after the 90-second remote window expires, the invoking human successfully completes Ubuntu PAM authentication in an interactive terminal.
+2. the caller successfully completes Ubuntu PAM authentication in an interactive terminal after pressing Enter while the request is pending, or after the 90-second remote window expires.
 
 Syn never turns a network-provided command into a root process. Sudo retains the original argv/environment and performs execution after the approval plug-in returns success.
 
@@ -19,11 +19,13 @@ Syn never turns a network-provided command into a root process. Sudo retains the
 | `syn_approval.so` | inside setuid process | intent construction, target signing, decision verification, fallback selection |
 | target signing key | root-readable only | proving a request came from the enforcement plug-in |
 | `syn-agent` | dedicated unprivileged user | availability and message relay only |
-| Nord Meshnet or Tailscale | network substrate | private reachability, not Syn authorization |
+| Reachable LAN or private network | network substrate | reachability, not Syn authorization |
 | Mac transport identity | ordinary Keychain item | connecting the paired Mac and signing denials |
 | Mac approval key | Secure Enclave, user-presence gated | signing one-use approvals |
 | macOS account | user-controlled | correct review and local user-presence authentication |
-| Ubuntu PAM stack | root process | password fallback after an eligible timeout |
+| Ubuntu PAM stack | root process | password authentication after pending Enter selection or eligible timeout |
+| Restricted maintenance SSH key | Mac-readable only | authorizing fixed privileged Syn installation operations |
+| Retained maintenance dispatcher | root-owned | verifying selected helper bytes and routing fixed lifecycle operations |
 
 ## Attacker models
 
@@ -32,6 +34,8 @@ Syn never turns a network-provided command into a root process. Sudo retains the
 Assume it can invoke `sudo`, control argv and environment, open ordinary network connections, read its own files and processes, and produce arbitrary terminal output. It does not know the Ubuntu password and cannot read root files.
 
 It must not be able to create approval requests directly, substitute a different command after approval, replay a decision, or invoke another setuid sudo provider against the managed `NOPASSWD` rule.
+
+First setup requires a trusted administrator session outside that agent's control. The bootstrap verifies the root-owned helper copy and pins the Mac's restricted maintenance key. Thereafter no administrator password is sent through the managed account's shell; modified incoming files fail protected hash checks. A stolen maintenance key or compromised Mac can authorize privileged installation and is outside this attacker model.
 
 ### Compromised transport agent
 
