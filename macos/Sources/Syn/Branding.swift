@@ -13,27 +13,6 @@ import SwiftUI
     colorScheme == .dark ? darkLogo : lightLogo
   }
 
-  static func applicationIcon(
-    for appearance: NSAppearance = NSApplication.shared.effectiveAppearance
-  ) -> NSImage {
-    let usesDarkIcon = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    let resource = usesDarkIcon ? "Syn-dark" : "Syn"
-    if let url = Bundle.main.url(forResource: resource, withExtension: "icns"),
-      let image = NSImage(contentsOf: url), image.isValid
-    {
-      return image
-    }
-    return usesDarkIcon ? darkLogo : lightLogo
-  }
-
-  static func installApplicationIcon(
-    for appearance: NSAppearance = NSApplication.shared.effectiveAppearance
-  ) {
-    // Explicitly set the running Dock tile, even when Launch Services has
-    // retained a generic icon from an earlier in-place installation.
-    NSApplication.shared.applicationIconImage = applicationIcon(for: appearance)
-  }
-
   static func resourceURL(_ name: String, extension fileExtension: String) -> URL? {
     if Bundle.main.bundleURL.pathExtension == "app" {
       // SwiftPM's accessor looks beside Contents, then in the build tree,
@@ -79,20 +58,6 @@ import SwiftUI
     image.isTemplate = true
     image.accessibilityDescription = hasPending ? "Syn, approval pending" : "Syn"
     return image
-  }
-}
-
-@MainActor final class SynAppDelegate: NSObject, NSApplicationDelegate {
-  private var appearanceObservation: NSKeyValueObservation?
-
-  func applicationDidFinishLaunching(_ notification: Notification) {
-    SynBranding.installApplicationIcon()
-    appearanceObservation = NSApplication.shared.observe(\.effectiveAppearance, options: [.new]) {
-      _, _ in
-      Task { @MainActor in
-        SynBranding.installApplicationIcon()
-      }
-    }
   }
 }
 
