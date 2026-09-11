@@ -277,6 +277,7 @@ private struct SetupView: View {
                 }
             }
             Section("App") {
+                LabeledContent("Syn release", value: ReleaseIdentity.current.releaseID)
                 Toggle(
                     "Launch Syn at login",
                     isOn: Binding(
