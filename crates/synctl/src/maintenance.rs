@@ -21,6 +21,8 @@ const BOOTSTRAP_ROOT: &str = "/var/lib/syn/onboarding-bootstrap";
 const HELPER: &str = "synctl-bootstrap";
 const MAX_HELPER: u64 = 128 * 1024 * 1024;
 const KEY_TAG: &str = "syn-maintenance-v1";
+const WIRE_COMMAND: &str = "syn-maintenance";
+const VERSION_FLAG: &str = "--protocol-version";
 const FORCED_COMMAND: &str = "/var/lib/syn/maintenance/synctl --json maintenance serve";
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -201,12 +203,12 @@ fn parse_original(value: &str) -> Result<Request> {
         bail!("maintenance command is too large");
     }
     let words: Vec<_> = value.split(' ').collect();
-    if words.iter().any(|word| word.is_empty()) || words.first() != Some(&KEY_TAG) {
+    if words.iter().any(|word| word.is_empty()) {
         bail!("unauthorized maintenance command");
     }
     match words.as_slice() {
-        [_, "probe"] => Ok(Request::Probe),
-        [_, "retain", operation, hash, size] => {
+        [WIRE_COMMAND, VERSION_FLAG, "1", "probe"] => Ok(Request::Probe),
+        [WIRE_COMMAND, VERSION_FLAG, "1", "retain", operation, hash, size] => {
             validate_hex(operation, 32, "operation ID")?;
             validate_hex(hash, 64, "helper hash")?;
             let size = size.parse::<u64>().context("helper size is invalid")?;
@@ -219,7 +221,7 @@ fn parse_original(value: &str) -> Result<Request> {
                 size,
             })
         }
-        [_, "prepare", operation, request_hash, source_hash] => {
+        [WIRE_COMMAND, VERSION_FLAG, "1", "prepare", operation, request_hash, source_hash] => {
             validate_hex(operation, 32, "operation ID")?;
             validate_hex(request_hash, 64, "request hash")?;
             validate_hex(source_hash, 64, "source hash")?;
@@ -229,7 +231,8 @@ fn parse_original(value: &str) -> Result<Request> {
                 source_hash: (*source_hash).into(),
             })
         }
-        [_, name @ ("cleanup" | "build" | "configure" | "activate" | "complete"), operation] => {
+        [WIRE_COMMAND, VERSION_FLAG, "1", name @ ("cleanup" | "build" | "configure" | "activate" | "complete"), operation] =>
+        {
             validate_hex(operation, 32, "operation ID")?;
             let name = match *name {
                 "cleanup" => "cleanup",
@@ -244,7 +247,7 @@ fn parse_original(value: &str) -> Result<Request> {
                 operation: (*operation).into(),
             })
         }
-        [_, "recover"] => Ok(Request::Recover),
+        [WIRE_COMMAND, VERSION_FLAG, "1", "recover"] => Ok(Request::Recover),
         _ => bail!("unauthorized maintenance command"),
     }
 }
@@ -821,36 +824,97 @@ mod tests {
     use super::*;
     const OP: &str = "0123456789abcdef0123456789abcdef";
     const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     #[test]
-    fn parses_fixed_vocabulary() {
-        assert_eq!(
-            parse_original("syn-maintenance-v1 probe").unwrap(),
-            Request::Probe
-        );
-        assert!(matches!(
-            parse_original(&format!("syn-maintenance-v1 retain {OP} {HASH} 123")).unwrap(),
-            Request::Retain { size: 123, .. }
-        ));
+    fn parses_cross_language_maintenance_vectors() {
+        let vectors: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/maintenance-requests-v1.json"
+        ))
+        .unwrap();
+        for vector in vectors {
+            let kind = vector["kind"].as_str().unwrap();
+            let command = vector["command"].as_str().unwrap();
+            let expected = match kind {
+                "probe" => Request::Probe,
+                "retain" => Request::Retain {
+                    operation: OP.into(),
+                    hash: HASH.into(),
+                    size: 123,
+                },
+                "prepare" => Request::Prepare {
+                    operation: OP.into(),
+                    request_hash: HASH.into(),
+                    source_hash: HASH.into(),
+                },
+                "cleanup" => Request::Phase {
+                    name: "cleanup",
+                    operation: OP.into(),
+                },
+                "build" => Request::Phase {
+                    name: "build",
+                    operation: OP.into(),
+                },
+                "configure" => Request::Phase {
+                    name: "configure",
+                    operation: OP.into(),
+                },
+                "activate" => Request::Phase {
+                    name: "activate",
+                    operation: OP.into(),
+                },
+                "complete" => Request::Phase {
+                    name: "complete",
+                    operation: OP.into(),
+                },
+                "recover" => Request::Recover,
+                _ => panic!("unknown maintenance request vector: {kind}"),
+            };
+            assert_eq!(parse_original(command).unwrap(), expected, "vector {kind}");
+        }
     }
     #[test]
     fn rejects_shell_syntax_and_extra_args() {
         for value in [
-            "syn-maintenance-v1 probe; id",
-            "syn-maintenance-v1 probe extra",
-            "syn-maintenance-v1 build x",
+            "syn-maintenance --protocol-version 1 probe; id",
+            "syn-maintenance --protocol-version 1 probe extra",
+            "syn-maintenance --protocol-version 1 build x",
             "rm -rf /",
-            "syn-maintenance-v1  probe",
+            "syn-maintenance --protocol-version 1  probe",
+            "syn-maintenance --protocol-version 1 probe\tid",
+            "syn-maintenance --protocol-version 1 probe\nid",
         ] {
             assert!(parse_original(value).is_err(), "accepted {value}");
         }
     }
     #[test]
     fn rejects_arbitrary_and_bad_tokens() {
-        assert!(parse_original(&format!("syn-maintenance-v1 execute {OP}")).is_err());
-        assert!(parse_original(&format!("syn-maintenance-v1 retain {OP} {HASH} 0")).is_err());
-        assert!(
-            parse_original(&format!("syn-maintenance-v1 prepare {OP} {HASH};x {HASH}")).is_err()
-        );
+        assert!(parse_original(&format!(
+            "syn-maintenance --protocol-version 1 execute {OP}"
+        ))
+        .is_err());
+        assert!(parse_original(&format!(
+            "syn-maintenance --protocol-version 1 retain {OP} {HASH} 0"
+        ))
+        .is_err());
+        assert!(parse_original(&format!(
+            "syn-maintenance --protocol-version 1 prepare {OP} {HASH};x {HASH}"
+        ))
+        .is_err());
+    }
+    #[test]
+    fn rejects_old_or_malformed_protocol_prefixes() {
+        for value in [
+            "syn-maintenance-v1 probe",
+            "syn-maintenance probe",
+            "syn-maintenance --protocol-version probe",
+            "syn-maintenance --protocol-version 2 probe",
+            "syn-maintenance --protocol-version 1 --protocol-version 1 probe",
+            "syn-maintenance --version 1 probe",
+            "syn-maintenance --protocol-version=1 probe",
+            "syn-maintenance 1 --protocol-version probe",
+        ] {
+            assert!(parse_original(value).is_err(), "accepted {value}");
+        }
     }
     #[test]
     fn validates_ed25519_key_shape() {
