@@ -114,15 +114,18 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
 
 @Test func requestExpiryCapsLongerGrantAtSigningTime() throws {
     let request = harnessRequest(expiresIn: 30)
+    let signingDate = request.expiresAt.addingTimeInterval(1)
     let grant = E2ETestRequestGrant(
         profileID: "org.syn-approvals.SynE2E.case-request-expiry", decision: .approve,
-        expiresAt: Date().addingTimeInterval(30), request: request
+        expiresAt: request.expiresAt.addingTimeInterval(30), request: request
     )
+    #expect(request.expiresAt < signingDate)
+    #expect(signingDate < grant.expiresAt)
     try withHarnessDirectory { root in
         let keys = try E2EDisposableKeyStore(rootDirectory: root, profileID: grant.profileID)
         let signer = try E2EScenarioSigner(
             grant: grant, request: request, keys: keys, now: request.issuedAt,
-            currentDate: { request.expiresAt.addingTimeInterval(1) }
+            currentDate: { signingDate }
         )
         let input = try signatureInput(request: request, approve: true, publicKey: signer.approvalPublicKey())
         #expect(throws: E2ETestHarnessError.self) {
