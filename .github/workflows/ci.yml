@@ -136,7 +136,7 @@ jobs:
           name: remote-release
           path: ${{ runner.temp }}/release
       - run: xcodebuild -version && swift --version
-      - run: swift test --package-path macos -Xswiftc -warnings-as-errors
+      - run: swift test --package-path macos -Xswiftc -warnings-as-errors --no-parallel
       - name: Package app with bundled logos and native icon
         run: |
           set -eu
