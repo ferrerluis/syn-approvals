@@ -59,7 +59,7 @@ jobs:
       - run: cargo clippy -p syn-sudo-plugin --target aarch64-unknown-linux-gnu --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: python3 scripts/test-log-privacy.py
-      - run: python3 -m unittest scripts/tests/test_release_tool.py
+      - run: python3 -m unittest scripts/tests/test_release_tool.py scripts/tests/test_build_macos_e2e_app.py scripts/tests/test_e2e_resource_manifest.py
 
   ubuntu-arm-release:
     needs: [release-metadata, rust]
