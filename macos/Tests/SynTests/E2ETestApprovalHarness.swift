@@ -752,10 +752,15 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
     private let request: VerifiedApprovalRequest
     private let keys: E2EDisposableKeyStore
     private let effectiveExpiry: Date
+    private let currentDate: @Sendable () -> Date
     private let lock = NSLock()
     private var consumed = false
 
-    init(grant: E2ETestRequestGrant, request: VerifiedApprovalRequest, keys: E2EDisposableKeyStore, now: Date = .now) throws {
+    init(
+        grant: E2ETestRequestGrant, request: VerifiedApprovalRequest,
+        keys: E2EDisposableKeyStore, now: Date = .now,
+        currentDate: @escaping @Sendable () -> Date = { .now }
+    ) throws {
         try grant.validate(now: now)
         guard grant.matches(request) else { throw E2ETestHarnessError.requestMismatch }
         let expiry = min(grant.expiresAt, request.expiresAt)
@@ -764,6 +769,7 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
         self.request = request
         self.keys = keys
         effectiveExpiry = expiry
+        self.currentDate = currentDate
     }
 
     func approvalPublicKey() throws -> Data { keys.publicIdentities.approval }
@@ -788,7 +794,7 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
         try lock.withLock {
             guard !consumed else { throw E2ETestHarnessError.grantConsumed }
             consumed = true
-            guard effectiveExpiry > .now else {
+            guard effectiveExpiry > currentDate() else {
                 throw E2ETestHarnessError.invalidConfiguration("grant expired")
             }
             guard grant.decision == expected || (expected == .approve && grant.decision == .cancelAuthentication) else {
