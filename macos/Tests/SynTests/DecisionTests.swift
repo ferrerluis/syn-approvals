@@ -160,7 +160,9 @@ private func decisionAction(_ message: WireMessage, key: P256.Signing.PublicKey)
 
 @Test @MainActor func denyDuringAuthenticationPreventsApprovalAndDuplicatePrompt() async throws {
     let signer = TestSigner()
-    signer.approvalDelay = 0.3
+    let gate = DispatchSemaphore(value: 0)
+    signer.approvalGate = gate
+    defer { gate.signal() }
     var messages: [WireMessage] = []
     let model = SynModel(startServices: false, signer: signer) { message, _ in messages.append(message) }
     let item = request()
@@ -171,6 +173,7 @@ private func decisionAction(_ message: WireMessage, key: P256.Signing.PublicKey)
     #expect(signer.approvalStarted)
     await model.approve(item.id)
     await model.deny(item.id)
+    gate.signal()
     await task.value
     #expect(signer.approvalSigns == 1)
     #expect(messages.count == 1)
