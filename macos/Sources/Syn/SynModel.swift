@@ -44,8 +44,7 @@ final class SynModel: ObservableObject {
     var openMainWindow: (() -> Void)?
 
     private let store: TargetStore?
-    private let keyStore: SynKeyStore
-    private let signer: any DecisionSigning
+    private let signingProvider: any DecisionSignerProviding
     private let servicesEnabled: Bool
     private let startupPreference: StartupPreference?
     private let decisionSender: (@MainActor (WireMessage, String) async throws -> Void)?
@@ -53,8 +52,9 @@ final class SynModel: ObservableObject {
     private let hostKeyScanner: any SSHHostKeyScanning
     private let knownHostsStore: SynKnownHostsStore?
     private let onboardingCoordinator = RemoteOnboardingCoordinator()
-    private let transportIdentityStore = TransportIdentityStore()
-    private let notifications = SynNotificationCenter()
+    private let transportIdentityStore: TransportIdentityStore
+    private let notifications: any SynNotifying
+    private let verifiedRequestObserver: (@Sendable (VerifiedApprovalRequest) throws -> Void)?
     private var connections: [String: TargetConnection] = [:]
     private var seenRequests: [String: (hash: Data, expiresAt: Date)] = [:]
     private var reconnectAttempts: [String: Int] = [:]
@@ -72,22 +72,30 @@ final class SynModel: ObservableObject {
     init(
         startServices: Bool = true,
         signer: (any DecisionSigning)? = nil,
+        signingProvider: (any DecisionSignerProviding)? = nil,
         decisionSender: (@MainActor (WireMessage, String) async throws -> Void)? = nil,
         setupChecker: any MachineSetupChecking = SSHMachineSetupChecker(),
         hostKeyScanner: any SSHHostKeyScanning = SystemSSHHostKeyScanner(),
-        knownHostsStore: SynKnownHostsStore? = nil
+        knownHostsStore: SynKnownHostsStore? = nil,
+        targetStore: TargetStore? = nil,
+        startupPreference: StartupPreference? = nil,
+        notifications: any SynNotifying = SynNotificationCenter(),
+        transportIdentityStore: TransportIdentityStore = TransportIdentityStore(),
+        verifiedRequestObserver: (@Sendable (VerifiedApprovalRequest) throws -> Void)? = nil
     ) {
         let keyStore = SynKeyStore()
-        self.keyStore = keyStore
-        self.signer = signer ?? keyStore
+        self.signingProvider = signingProvider ?? FixedDecisionSignerProvider(signer: signer ?? keyStore)
         servicesEnabled = startServices
-        startupPreference = startServices ? StartupPreference() : nil
+        self.startupPreference = startServices ? (startupPreference ?? StartupPreference()) : nil
         self.decisionSender = decisionSender
         self.setupChecker = setupChecker
         self.hostKeyScanner = hostKeyScanner
         self.knownHostsStore = knownHostsStore ?? (try? SynKnownHostsStore())
+        self.notifications = notifications
+        self.transportIdentityStore = transportIdentityStore
+        self.verifiedRequestObserver = verifiedRequestObserver
         guard startServices else { store = nil; return }
-        store = try? TargetStore()
+        store = targetStore ?? (try? TargetStore())
         if let store {
             do {
                 targets = try store.load()
@@ -252,7 +260,7 @@ final class SynModel: ObservableObject {
         }
         setupTask?.cancel()
         let settings = checkedSetup.settings
-        let keyStore = self.keyStore
+        let keyStore = self.signingProvider
         let identityStore = transportIdentityStore
         let coordinator = onboardingCoordinator
         addMachineState = .installing(.staging)
@@ -377,7 +385,7 @@ final class SynModel: ObservableObject {
         preparingKeys = true
         defer { preparingKeys = false }
         do {
-            let keyStore = self.keyStore
+            let keyStore = self.signingProvider
             let identities = try await Task.detached { try keyStore.publicIdentities() }.value
             let object: [String: Any] = [
                 "schema_version": 1,
@@ -432,6 +440,7 @@ final class SynModel: ObservableObject {
         }
         let decision: Data
         do {
+            let signer = try signingProvider.signer(for: request)
             decision = try await DecisionBuilder.sign(
                 request: request,
                 approve: true,
@@ -468,6 +477,7 @@ final class SynModel: ObservableObject {
         finish(request)
         guard !request.isExpired else { return }
         do {
+            let signer = try signingProvider.signer(for: request)
             let decision = try await DecisionBuilder.sign(
                 request: request,
                 approve: false,
@@ -769,6 +779,12 @@ final class SynModel: ObservableObject {
         }
         seenRequests[request.id] = (request.payloadHash, request.expiresAt)
         pending.append(request)
+        do { try verifiedRequestObserver?(request) }
+        catch {
+            pending.removeAll { $0.id == request.id }
+            seenRequests.removeValue(forKey: request.id)
+            throw error
+        }
         if servicesEnabled {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(max(0, request.expiresAt.timeIntervalSinceNow)))

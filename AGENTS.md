@@ -2,6 +2,9 @@
 
 These rules apply to the whole repository.
 
+- Make in-scope, reversible implementation and testing decisions independently instead of asking Luis each time. Choose the smallest practical change, preserve a way back, and briefly report the decision and how to undo it.
+- Unsigned candidate commits are authorized when signing would block progress or require another user prompt. Use a per-commit option; leave repository and global Git signing settings unchanged.
+- Continue to honor explicit approval gates, including asking immediately before a reboot; reversibility does not expand the authorized scope or waive authentication and security requirements.
 - Treat every change to the sudo ABI, PAM, pairing, cryptography, installer, recovery, transport authentication, or Secure Enclave code as security-sensitive.
 - Syn gates an invocation already accepted by sudo policy. Never add a network command string, shell reconstruction, generic executor, approval URL, bearer-token approval endpoint, or arbitrary adapter renderer.
 - Preserve executable, argv, working directory, identities, and environment digest as typed fields. Raw command bytes must never be joined into a shell command.

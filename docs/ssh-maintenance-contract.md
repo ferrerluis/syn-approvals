@@ -28,9 +28,17 @@ The SSH key is forced to execute:
 /var/lib/syn/maintenance/synctl --json maintenance serve
 ```
 
-It parses SSH_ORIGINAL_COMMAND as an exact bounded token vocabulary, never as executable shell text:
+It parses SSH_ORIGINAL_COMMAND as an exact bounded token vocabulary, never as executable shell text. Requests start with `syn-maintenance --protocol-version 1`, followed by one operation. For example:
 
-| Request after syn-maintenance-v1 | Purpose |
+```text
+syn-maintenance --protocol-version 1 recover
+```
+
+The flag identifies the maintenance protocol, not the timestamp-based app release. Version 1 is required exactly once in this position; missing, unsupported, duplicate or reordered flags fail closed. The previous `syn-maintenance-v1` request spelling is rejected. Existing SSH key ownership markers remain unchanged so key revocation still identifies the same entry.
+
+This is a wire-format cutover: old and new Mac/helper pairs cannot perform maintenance together. The previously published E2E A/B artifacts use the old spelling and must be replaced by new matched candidates, without overwriting those releases. No deployed maintenance setup has yet been confirmed on the test Pi; verify that during preflight. If an old dispatcher is found, do not attempt a normal mixed-version update: retain recovery access and re-bootstrap the matching helper through the trusted administrator path.
+
+| Operation after `syn-maintenance --protocol-version 1` | Purpose |
 | --- | --- |
 | probe | Confirm protocol 1 and the configured managed username. |
 | retain OP HASH SIZE | Copy the fixed incoming helper into protected storage, verifying the copy before use. |

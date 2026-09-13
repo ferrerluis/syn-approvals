@@ -1,7 +1,15 @@
 import Foundation
 import UserNotifications
 
-final class SynNotificationCenter: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+protocol SynNotifying: AnyObject, Sendable {
+    var onReview: (@Sendable (String) -> Void)? { get set }
+    var onDeny: (@Sendable (String) -> Void)? { get set }
+    func configure() async throws
+    func post(request: VerifiedApprovalRequest, targetName: String) async throws
+    func remove(requestID: String)
+}
+
+final class SynNotificationCenter: NSObject, SynNotifying, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let category = "SYN_APPROVAL"
     static let reviewAction = "SYN_REVIEW"
     static let denyAction = "SYN_DENY"

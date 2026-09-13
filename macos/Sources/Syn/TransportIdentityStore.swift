@@ -63,17 +63,21 @@ final class TransportIdentityStore: Sendable {
     static let renewalMargin: TimeInterval = 30 * 24 * 60 * 60
     private let backend: any TransportIdentityBackend
     private let now: @Sendable () -> Date
+    private let labelPrefix: String
 
     init(
         backend: any TransportIdentityBackend = MacTransportIdentityBackend(),
-        now: @escaping @Sendable () -> Date = { .now }
+        now: @escaping @Sendable () -> Date = { .now },
+        labelPrefix: String = "Syn"
     ) {
+        precondition(!labelPrefix.isEmpty && labelPrefix.utf8.count <= 128)
         self.backend = backend
         self.now = now
+        self.labelPrefix = labelPrefix
     }
 
     func existingIdentity(for targetID: String) throws -> TransportIdentity? {
-        let label = try Self.label(for: targetID)
+        let label = try Self.label(for: targetID, prefix: labelPrefix)
         return try existingIdentity(label: label)
     }
 
@@ -93,7 +97,7 @@ final class TransportIdentityStore: Sendable {
     }
 
     func identity(for targetID: String) throws -> TransportIdentity {
-        let label = try Self.label(for: targetID)
+        let label = try Self.label(for: targetID, prefix: labelPrefix)
         return try Self.withCreationLock(targetID: targetID) {
             if let existing = try existingIdentity(label: label) { return existing }
             let created = try backend.createIdentity(label: label)
@@ -138,7 +142,7 @@ final class TransportIdentityStore: Sendable {
         return notBefore <= now && notAfter > now.addingTimeInterval(renewalMargin)
     }
 
-    static func label(for targetID: String) throws -> String {
+    static func label(for targetID: String, prefix: String = "Syn") throws -> String {
         guard !targetID.isEmpty, targetID.utf8.count <= 128,
               targetID.utf8.allSatisfy({ byte in
                   (48...57).contains(byte) || (65...90).contains(byte)
@@ -146,7 +150,11 @@ final class TransportIdentityStore: Sendable {
               }) else {
             throw TransportIdentityStoreError.invalidTargetID
         }
-        return "Syn \(targetID) transport"
+        guard !prefix.isEmpty, prefix.utf8.count <= 128,
+              prefix.utf8.allSatisfy({ $0 >= 32 && $0 < 127 }) else {
+            throw TransportIdentityStoreError.invalidTargetID
+        }
+        return "\(prefix) \(targetID) transport"
     }
 
     static func pem(for certificateDER: Data) -> Data {

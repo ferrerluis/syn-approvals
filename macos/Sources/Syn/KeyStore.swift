@@ -22,6 +22,19 @@ protocol DecisionSigning: Sendable {
     func signDenial(payload: Data) throws -> (keyID: Data, signature: Data)
 }
 
+protocol DecisionSignerProviding: Sendable {
+    func publicIdentities() throws -> (approval: Data, denial: Data)
+    func signer(for request: VerifiedApprovalRequest) throws -> any DecisionSigning
+}
+
+struct FixedDecisionSignerProvider: DecisionSignerProviding {
+    let signer: any DecisionSigning
+    func publicIdentities() throws -> (approval: Data, denial: Data) {
+        (try signer.approvalPublicKey(), try signer.denialPublicKey())
+    }
+    func signer(for request: VerifiedApprovalRequest) throws -> any DecisionSigning { signer }
+}
+
 final class ApprovalCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var canceled = false
@@ -180,4 +193,8 @@ final class SynKeyStore: DecisionSigning, @unchecked Sendable {
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
     }
+}
+
+extension SynKeyStore: DecisionSignerProviding {
+    func signer(for request: VerifiedApprovalRequest) throws -> any DecisionSigning { self }
 }

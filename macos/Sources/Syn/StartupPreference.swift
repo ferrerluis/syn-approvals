@@ -8,6 +8,14 @@ protocol LoginItemManaging {
 }
 
 @MainActor
+protocol StartupPreferenceStoring {
+    func string(forKey defaultName: String) -> String?
+    func set(_ value: Any?, forKey defaultName: String)
+}
+
+extension UserDefaults: StartupPreferenceStoring {}
+
+@MainActor
 struct SystemLoginItem: LoginItemManaging {
     var enabled: Bool { SMAppService.mainApp.status == .enabled }
 
@@ -23,10 +31,10 @@ struct SystemLoginItem: LoginItemManaging {
 @MainActor
 final class StartupPreference {
     private static let choiceKey = "syn.startupChoice.v1"
-    private let defaults: UserDefaults
+    private let defaults: any StartupPreferenceStoring
     private let service: any LoginItemManaging
 
-    init(defaults: UserDefaults = .standard, service: any LoginItemManaging = SystemLoginItem()) {
+    init(defaults: any StartupPreferenceStoring = UserDefaults.standard, service: any LoginItemManaging = SystemLoginItem()) {
         self.defaults = defaults
         self.service = service
     }

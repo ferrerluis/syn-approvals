@@ -198,6 +198,8 @@ struct SSHMaintenanceRoute: Sendable {
 /// validated before any shell text is produced; callers cannot supply paths or
 /// command fragments.
 enum SSHPrivilegedOperation: Sendable, Equatable {
+    private static let commandPrefix = "syn-maintenance --protocol-version 1"
+
     case probe
     case retainHelper(operationID: String, sha256: String, size: UInt64)
     case prepare(operationID: String, requestSHA256: String, sourceSHA256: String)
@@ -222,19 +224,19 @@ enum SSHPrivilegedOperation: Sendable, Equatable {
         get throws {
             switch self {
             case .probe:
-                return "syn-maintenance-v1 probe"
+                return "\(Self.commandPrefix) probe"
             case let .retainHelper(operationID, sha256, size):
                 try Self.requireOperationID(operationID)
                 try Self.requireSHA256(sha256)
                 guard size > 0, size <= RemoteHelperArtifactDescriptor.maximumArtifactBytes else {
                     throw SynProtocolError.invalid("The maintenance helper size is invalid.")
                 }
-                return "syn-maintenance-v1 retain \(operationID) \(sha256) \(size)"
+                return "\(Self.commandPrefix) retain \(operationID) \(sha256) \(size)"
             case let .prepare(operationID, requestSHA256, sourceSHA256):
                 try Self.requireOperationID(operationID)
                 try Self.requireSHA256(requestSHA256)
                 try Self.requireSHA256(sourceSHA256)
-                return "syn-maintenance-v1 prepare \(operationID) \(requestSHA256) \(sourceSHA256)"
+                return "\(Self.commandPrefix) prepare \(operationID) \(requestSHA256) \(sourceSHA256)"
             case let .cleanup(operationID):
                 return try protected(operationID, phase: "cleanup")
             case let .build(operationID):
@@ -246,14 +248,14 @@ enum SSHPrivilegedOperation: Sendable, Equatable {
             case let .complete(operationID):
                 return try protected(operationID, phase: "complete")
             case .recover:
-                return "syn-maintenance-v1 recover"
+                return "\(Self.commandPrefix) recover"
             }
         }
     }
 
     private func protected(_ operationID: String, phase: String) throws -> String {
         try Self.requireOperationID(operationID)
-        return "syn-maintenance-v1 \(phase) \(operationID)"
+        return "\(Self.commandPrefix) \(phase) \(operationID)"
     }
 
     private static func requireOperationID(_ value: String) throws {

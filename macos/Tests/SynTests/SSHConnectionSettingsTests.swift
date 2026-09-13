@@ -65,11 +65,11 @@ import Testing
         try settings.maintenanceArguments(for: operation, identityFile: identity)
     }
     #expect(try arguments(.prepare(operationID: operationID, requestSHA256: digest, sourceSHA256: digest)).last
-        == "syn-maintenance-v1 prepare \(operationID) \(digest) \(digest)")
+        == "syn-maintenance --protocol-version 1 prepare \(operationID) \(digest) \(digest)")
     #expect(try arguments(.retainHelper(operationID: operationID, sha256: digest, size: 123)).last
-        == "syn-maintenance-v1 retain \(operationID) \(digest) 123")
-    #expect(try arguments(.recover).last == "syn-maintenance-v1 recover")
-    #expect(try arguments(.probe).last == "syn-maintenance-v1 probe")
+        == "syn-maintenance --protocol-version 1 retain \(operationID) \(digest) 123")
+    #expect(try arguments(.recover).last == "syn-maintenance --protocol-version 1 recover")
+    #expect(try arguments(.probe).last == "syn-maintenance --protocol-version 1 probe")
     let phases: [(SSHPrivilegedOperation, String)] = [
         (.build(operationID: operationID), "build"),
         (.configure(operationID: operationID), "configure"),
@@ -79,7 +79,7 @@ import Testing
     ]
     for (operation, phase) in phases {
         let args = try arguments(operation)
-        #expect(args.last == "syn-maintenance-v1 \(phase) \(operationID)")
+        #expect(args.last == "syn-maintenance --protocol-version 1 \(phase) \(operationID)")
         for option in ["StrictHostKeyChecking=yes", "BatchMode=yes", "IdentityAgent=none",
                        "IdentitiesOnly=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no",
                        "ForwardAgent=no", "ClearAllForwardings=yes"] {
@@ -99,4 +99,39 @@ import Testing
     }
     #expect(SSHPrivilegedOperation.build(operationID: operationID).timeout == .seconds(1_800))
     #expect(SSHPrivilegedOperation.complete(operationID: operationID).timeout == .seconds(150))
+}
+
+@Test func privilegedOnboardingCommandsMatchCrossLanguageVectors() throws {
+    struct Vector: Decodable {
+        let kind: String
+        let command: String
+    }
+    let fixture = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("tests/fixtures/maintenance-requests-v1.json")
+    let vectors = try JSONDecoder().decode([Vector].self, from: Data(contentsOf: fixture))
+    let operationID = String(repeating: "0123456789abcdef", count: 2)
+    let digest = String(repeating: "0123456789abcdef", count: 4)
+    let operations: [String: SSHPrivilegedOperation] = [
+        "probe": .probe,
+        "retain": .retainHelper(operationID: operationID, sha256: digest, size: 123),
+        "prepare": .prepare(operationID: operationID, requestSHA256: digest, sourceSHA256: digest),
+        "cleanup": .cleanup(operationID: operationID),
+        "build": .build(operationID: operationID),
+        "configure": .configure(operationID: operationID),
+        "activate": .activate(operationID: operationID),
+        "complete": .complete(operationID: operationID),
+        "recover": .recover,
+    ]
+    let settings = SSHConnectionSettings(hostname: "pi", username: "user", port: nil)
+    let identity = URL(fileURLWithPath: "/tmp/syn-test-key")
+    #expect(Set(vectors.map(\.kind)) == Set(operations.keys))
+    for vector in vectors {
+        let operation = try #require(operations[vector.kind])
+        #expect(try settings.maintenanceArguments(for: operation, identityFile: identity).last
+            == vector.command)
+    }
 }

@@ -1,0 +1,11 @@
+[
+  {"kind":"probe","command":"syn-maintenance --protocol-version 1 probe"},
+  {"kind":"retain","command":"syn-maintenance --protocol-version 1 retain 0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 123"},
+  {"kind":"prepare","command":"syn-maintenance --protocol-version 1 prepare 0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+  {"kind":"cleanup","command":"syn-maintenance --protocol-version 1 cleanup 0123456789abcdef0123456789abcdef"},
+  {"kind":"build","command":"syn-maintenance --protocol-version 1 build 0123456789abcdef0123456789abcdef"},
+  {"kind":"configure","command":"syn-maintenance --protocol-version 1 configure 0123456789abcdef0123456789abcdef"},
+  {"kind":"activate","command":"syn-maintenance --protocol-version 1 activate 0123456789abcdef0123456789abcdef"},
+  {"kind":"complete","command":"syn-maintenance --protocol-version 1 complete 0123456789abcdef0123456789abcdef"},
+  {"kind":"recover","command":"syn-maintenance --protocol-version 1 recover"}
+]
