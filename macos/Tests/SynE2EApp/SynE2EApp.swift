@@ -25,23 +25,25 @@ private final class E2EPreferences: StartupPreferenceStoring {
 final class SynE2EAppDelegate: NSObject, NSApplicationDelegate {
     private var keys: E2EDisposableKeyStore?
     private var inbox: E2EGrantInbox?
-    private var stateDirectory: URL?
+    private var state: E2EProfileState?
+    private var finalCleanup = false
 
     func own(
         _ keys: E2EDisposableKeyStore, inbox: E2EGrantInbox,
-        stateDirectory: URL
+        state: E2EProfileState, finalCleanup: Bool
     ) {
         self.keys = keys; self.inbox = inbox
-        self.stateDirectory = stateDirectory
+        self.state = state; self.finalCleanup = finalCleanup
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        try? keys?.cleanup()
-        inbox?.cleanupOwnedFiles()
-        if let stateDirectory { _ = rmdir(stateDirectory.path) }
+        if finalCleanup {
+            do { try state?.cleanup(); try inbox?.cleanupOwnedFiles(requireRemoval: true); try keys?.cleanup() }
+            catch { fatalError("SynE2E could not clean its exact isolated test profile") }
+        }
         keys = nil
         inbox = nil
-        stateDirectory = nil
+        state = nil
     }
 }
 
@@ -56,21 +58,17 @@ struct SynE2EApp: App {
               let profileID = environment["SYN_E2E_PROFILE_ID"] else {
             fatalError("SynE2E requires an explicit disposable profile root and profile identifier")
         }
-        var createdKeys: E2EDisposableKeyStore?
         do {
             let root = URL(fileURLWithPath: rootPath, isDirectory: true)
             let keys = try E2EDisposableKeyStore(
                 rootDirectory: root, profileID: profileID
             )
-            createdKeys = keys
             let inbox = try E2EGrantInbox(directory: root, profileID: profileID)
-            let state = root.appendingPathComponent(profileID + ".state", isDirectory: true)
-            try FileManager.default.createDirectory(at: state, withIntermediateDirectories: false)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: state.path)
+            let state = try E2EProfileState(rootDirectory: root, profileID: profileID)
             let defaults = E2EPreferences()
             let provider = E2EScenarioSigningProvider(inbox: inbox, keys: keys)
-            let knownHosts = try SynKnownHostsStore(fileURL: state.appendingPathComponent("known_hosts"))
-            let targets = try TargetStore(fileURL: state.appendingPathComponent("targets.json"))
+            let knownHosts = try SynKnownHostsStore(fileURL: state.directory.appendingPathComponent("known_hosts"))
+            let targets = try TargetStore(fileURL: state.directory.appendingPathComponent("targets.json"))
             _model = StateObject(wrappedValue: SynModel(
                 startServices: true,
                 signingProvider: provider,
@@ -82,10 +80,10 @@ struct SynE2EApp: App {
                 verifiedRequestObserver: { try inbox.publish($0) }
             ))
             appDelegate.own(
-                keys, inbox: inbox, stateDirectory: state
+                keys, inbox: inbox, state: state,
+                finalCleanup: environment["SYN_E2E_FINAL_CLEANUP"] == "1"
             )
         } catch {
-            try? createdKeys?.cleanup()
             fatalError("SynE2E could not open its isolated test profile")
         }
     }

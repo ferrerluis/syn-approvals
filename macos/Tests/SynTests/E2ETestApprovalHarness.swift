@@ -152,11 +152,14 @@ final class E2EGrantInbox: @unchecked Sendable {
     private let directoryDescriptor: Int32
     private let directoryIdentity: FileIdentity
     private let beforeGrantClaim: (@Sendable () -> Void)?
+    private let beforeCleanupClaim: (@Sendable (String) -> Void)?
+    private let beforeDirectoryCleanupClaim: (@Sendable () -> Void)?
     private let profileID: String
     private let lock = NSLock()
-    private var offerIdentity: FileIdentity?
 
-    init(directory: URL, profileID: String, beforeGrantClaim: (@Sendable () -> Void)? = nil) throws {
+    init(directory: URL, profileID: String, beforeGrantClaim: (@Sendable () -> Void)? = nil,
+         beforeCleanupClaim: (@Sendable (String) -> Void)? = nil,
+         beforeDirectoryCleanupClaim: (@Sendable () -> Void)? = nil) throws {
         guard profileID.hasPrefix("org.syn-approvals.SynE2E."),
               profileID != "org.syn-approvals.Syn", !profileID.contains("/") else {
             throw E2ETestHarnessError.invalidConfiguration("profile is not isolated")
@@ -170,18 +173,19 @@ final class E2EGrantInbox: @unchecked Sendable {
             throw E2ETestHarnessError.invalidConfiguration("inbox root must be owned and private")
         }
         let name = profileID + ".inbox"
-        guard mkdirat(rootFD, name, 0o700) == 0 else {
-            close(rootFD); throw Self.posixError("inbox already exists or cannot be created")
+        let createdDirectory = mkdirat(rootFD, name, 0o700) == 0
+        guard createdDirectory || errno == EEXIST else {
+            close(rootFD); throw Self.posixError("inbox cannot be created")
         }
         let inboxFD = openat(rootFD, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
         guard inboxFD >= 0 else {
-            _ = unlinkat(rootFD, name, AT_REMOVEDIR); close(rootFD)
+            if createdDirectory { _ = unlinkat(rootFD, name, AT_REMOVEDIR) }; close(rootFD)
             throw Self.posixError("could not open private inbox")
         }
         var inboxStatus = stat()
         guard fstat(inboxFD, &inboxStatus) == 0, inboxStatus.st_uid == getuid(),
               inboxStatus.st_mode & S_IFMT == S_IFDIR, inboxStatus.st_mode & 0o777 == 0o700 else {
-            close(inboxFD); _ = unlinkat(rootFD, name, AT_REMOVEDIR); close(rootFD)
+            close(inboxFD); if createdDirectory { _ = unlinkat(rootFD, name, AT_REMOVEDIR) }; close(rootFD)
             throw E2ETestHarnessError.invalidConfiguration("inbox must be owned and private")
         }
         self.directory = directory.appendingPathComponent(name, isDirectory: true)
@@ -189,6 +193,8 @@ final class E2EGrantInbox: @unchecked Sendable {
         directoryDescriptor = inboxFD
         directoryIdentity = FileIdentity(device: inboxStatus.st_dev, inode: inboxStatus.st_ino)
         self.beforeGrantClaim = beforeGrantClaim
+        self.beforeCleanupClaim = beforeCleanupClaim
+        self.beforeDirectoryCleanupClaim = beforeDirectoryCleanupClaim
         self.profileID = profileID
     }
 
@@ -212,7 +218,6 @@ final class E2EGrantInbox: @unchecked Sendable {
                   status.st_mode & S_IFMT == S_IFREG, status.st_mode & 0o777 == 0o600 else {
                 throw E2ETestHarnessError.invalidConfiguration("offer is not an owned regular file")
             }
-            offerIdentity = FileIdentity(device: status.st_dev, inode: status.st_ino)
         }
     }
 
@@ -251,24 +256,66 @@ final class E2EGrantInbox: @unchecked Sendable {
         }
     }
 
-    func cleanupOwnedFiles() {
-        lock.withLock {
-            if let offerIdentity {
-                var status = stat()
-                if fstatat(directoryDescriptor, "offer.json", &status, AT_SYMLINK_NOFOLLOW) == 0,
-                   FileIdentity(device: status.st_dev, inode: status.st_ino) == offerIdentity,
-                   status.st_uid == getuid(), status.st_mode & S_IFMT == S_IFREG,
-                   status.st_mode & 0o777 == 0o600,
-                   unlinkat(directoryDescriptor, "offer.json", 0) == 0 {
-                    self.offerIdentity = nil
-                }
-            }
+    func cleanupOwnedFiles(requireRemoval: Bool = false) throws {
+        try lock.withLock {
             var current = stat()
             guard fstatat(rootDescriptor, profileID + ".inbox", &current, AT_SYMLINK_NOFOLLOW) == 0,
                   FileIdentity(device: current.st_dev, inode: current.st_ino) == directoryIdentity else { return }
-            // rmdir succeeds only when the coordinator left no grant or foreign
-            // entry, so unexpected data is preserved without enumerating it.
-            _ = unlinkat(rootDescriptor, profileID + ".inbox", AT_REMOVEDIR)
+            for name in ["offer.json", "grant.json"] {
+                var status = stat()
+                if fstatat(directoryDescriptor, name, &status, AT_SYMLINK_NOFOLLOW) == 0 {
+                    guard status.st_uid == getuid(), status.st_mode & S_IFMT == S_IFREG,
+                          status.st_mode & 0o777 == 0o600, status.st_nlink == 1,
+                          status.st_size >= 0, status.st_size <= 64 * 1024 else {
+                        if requireRemoval { throw E2ETestHarnessError.invalidConfiguration("inbox residual is unsafe") }
+                        continue
+                    }
+                    let fd = openat(directoryDescriptor, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+                    guard fd >= 0 else { if requireRemoval { throw Self.posixError("inbox residual cannot be opened") }; continue }
+                    let data = try Self.readAll(from: fd, limit: 64 * 1024); close(fd)
+                    let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+                    let residualProfile: String?
+                    if name == "offer.json" { residualProfile = try? decoder.decode(E2ETestRequestOffer.self, from: data).profileID }
+                    else { residualProfile = try? decoder.decode(E2ETestRequestGrant.self, from: data).profileID }
+                    guard residualProfile == profileID else {
+                        if requireRemoval { throw E2ETestHarnessError.invalidConfiguration("inbox residual is foreign") }
+                        continue
+                    }
+                    let identity = FileIdentity(device: status.st_dev, inode: status.st_ino)
+                    let staged = ".cleanup-\(UUID().uuidString)"
+                    beforeCleanupClaim?(name)
+                    guard renameatx_np(directoryDescriptor, name, directoryDescriptor, staged, UInt32(RENAME_EXCL)) == 0 else {
+                        throw Self.posixError("inbox residual cleanup failed")
+                    }
+                    var stagedStatus = stat()
+                    guard fstatat(directoryDescriptor, staged, &stagedStatus, AT_SYMLINK_NOFOLLOW) == 0,
+                          FileIdentity(device: stagedStatus.st_dev, inode: stagedStatus.st_ino) == identity,
+                          stagedStatus.st_uid == getuid(), stagedStatus.st_mode & S_IFMT == S_IFREG,
+                          stagedStatus.st_mode & 0o777 == 0o600, stagedStatus.st_nlink == 1,
+                          stagedStatus.st_size >= 0, stagedStatus.st_size <= 64 * 1024 else {
+                        _ = renameatx_np(directoryDescriptor, staged, directoryDescriptor, name, UInt32(RENAME_EXCL))
+                        throw E2ETestHarnessError.invalidConfiguration("inbox residual changed during cleanup")
+                    }
+                    guard unlinkat(directoryDescriptor, staged, 0) == 0 else { throw Self.posixError("inbox cleanup failed") }
+                }
+            }
+            let stagedDirectory = ".cleanup-inbox-\(UUID().uuidString)"
+            beforeDirectoryCleanupClaim?()
+            guard renameatx_np(rootDescriptor, profileID + ".inbox", rootDescriptor, stagedDirectory, UInt32(RENAME_EXCL)) == 0 else {
+                if !requireRemoval { return }; throw Self.posixError("inbox cleanup staging failed")
+            }
+            var stagedStatus = stat()
+            guard fstatat(rootDescriptor, stagedDirectory, &stagedStatus, AT_SYMLINK_NOFOLLOW) == 0,
+                  FileIdentity(device: stagedStatus.st_dev, inode: stagedStatus.st_ino) == directoryIdentity,
+                  stagedStatus.st_uid == getuid(), stagedStatus.st_mode & S_IFMT == S_IFDIR,
+                  stagedStatus.st_mode & 0o7777 == 0o700 else {
+                _ = renameatx_np(rootDescriptor, stagedDirectory, rootDescriptor, profileID + ".inbox", UInt32(RENAME_EXCL))
+                throw E2ETestHarnessError.invalidConfiguration("inbox directory changed during cleanup")
+            }
+            guard unlinkat(rootDescriptor, stagedDirectory, AT_REMOVEDIR) == 0 else {
+                _ = renameatx_np(rootDescriptor, stagedDirectory, rootDescriptor, profileID + ".inbox", UInt32(RENAME_EXCL))
+                if !requireRemoval { return }; throw Self.posixError("inbox cleanup failed")
+            }
         }
     }
 
@@ -303,6 +350,99 @@ final class E2EGrantInbox: @unchecked Sendable {
     }
 }
 
+final class E2EProfileState: @unchecked Sendable {
+    private struct Identity: Equatable { let device: dev_t; let inode: ino_t }
+    let directory: URL
+    private let rootFD: Int32
+    private let directoryFD: Int32
+    private let name: String
+    private let directoryIdentity: Identity
+    private let beforeCleanupClaim: (@Sendable (String) -> Void)?
+    private let beforeDirectoryCleanupClaim: (@Sendable () -> Void)?
+
+    init(rootDirectory: URL, profileID: String, beforeCleanupClaim: (@Sendable (String) -> Void)? = nil,
+         beforeDirectoryCleanupClaim: (@Sendable () -> Void)? = nil) throws {
+        guard profileID.hasPrefix("org.syn-approvals.SynE2E."), !profileID.contains("/") else {
+            throw E2ETestHarnessError.invalidConfiguration("profile is not isolated")
+        }
+        let root = open(rootDirectory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard root >= 0 else { throw E2ETestHarnessError.invalidConfiguration("state root cannot be opened") }
+        var rootStatus = stat()
+        guard fstat(root, &rootStatus) == 0, rootStatus.st_uid == getuid(),
+              rootStatus.st_mode & S_IFMT == S_IFDIR, rootStatus.st_mode & 0o777 == 0o700 else {
+            close(root); throw E2ETestHarnessError.invalidConfiguration("state root must be owned and private")
+        }
+        name = profileID + ".state"
+        let created = mkdirat(root, name, 0o700) == 0
+        guard created || errno == EEXIST else { close(root); throw E2ETestHarnessError.invalidConfiguration("state cannot be created") }
+        let state = openat(root, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+        guard state >= 0 else { close(root); throw E2ETestHarnessError.invalidConfiguration("state cannot be opened") }
+        var status = stat()
+        guard fstat(state, &status) == 0, status.st_uid == getuid(),
+              status.st_mode & S_IFMT == S_IFDIR, status.st_mode & 0o7777 == 0o700 else {
+            close(state); close(root); throw E2ETestHarnessError.invalidConfiguration("state must be owned and private")
+        }
+        rootFD = root; directoryFD = state
+        directoryIdentity = Identity(device: status.st_dev, inode: status.st_ino)
+        self.beforeCleanupClaim = beforeCleanupClaim
+        self.beforeDirectoryCleanupClaim = beforeDirectoryCleanupClaim
+        directory = rootDirectory.appendingPathComponent(name, isDirectory: true)
+    }
+
+    deinit { close(directoryFD); close(rootFD) }
+
+    func cleanup() throws {
+        for file in ["known_hosts", "targets.json", "targets.json.tmp"] {
+            var status = stat()
+            if fstatat(directoryFD, file, &status, AT_SYMLINK_NOFOLLOW) == 0 {
+                guard status.st_uid == getuid(), status.st_mode & S_IFMT == S_IFREG,
+                      status.st_mode & 0o777 == 0o600, status.st_nlink == 1,
+                      status.st_size >= 0, status.st_size <= 1024 * 1024 else {
+                    throw E2ETestHarnessError.invalidConfiguration("state residual is unsafe")
+                }
+                let identity = Identity(device: status.st_dev, inode: status.st_ino)
+                let staged = ".cleanup-\(UUID().uuidString)"
+                beforeCleanupClaim?(file)
+                guard renameatx_np(directoryFD, file, directoryFD, staged, UInt32(RENAME_EXCL)) == 0 else {
+                    throw E2ETestHarnessError.invalidConfiguration("state cleanup staging failed")
+                }
+                var stagedStatus = stat()
+                guard fstatat(directoryFD, staged, &stagedStatus, AT_SYMLINK_NOFOLLOW) == 0,
+                      Identity(device: stagedStatus.st_dev, inode: stagedStatus.st_ino) == identity,
+                      stagedStatus.st_uid == getuid(), stagedStatus.st_mode & S_IFMT == S_IFREG,
+                      stagedStatus.st_mode & 0o777 == 0o600, stagedStatus.st_nlink == 1, stagedStatus.st_size >= 0,
+                      stagedStatus.st_size <= 1024 * 1024 else {
+                    _ = renameatx_np(directoryFD, staged, directoryFD, file, UInt32(RENAME_EXCL))
+                    throw E2ETestHarnessError.invalidConfiguration("state residual changed during cleanup")
+                }
+                guard unlinkat(directoryFD, staged, 0) == 0 else { throw E2ETestHarnessError.invalidConfiguration("state cleanup failed") }
+            }
+        }
+        var current = stat()
+        guard fstatat(rootFD, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+              Identity(device: current.st_dev, inode: current.st_ino) == directoryIdentity else {
+            throw E2ETestHarnessError.invalidConfiguration("state directory was replaced")
+        }
+        let stagedDirectory = ".cleanup-state-\(UUID().uuidString)"
+        beforeDirectoryCleanupClaim?()
+        guard renameatx_np(rootFD, name, rootFD, stagedDirectory, UInt32(RENAME_EXCL)) == 0 else {
+            throw E2ETestHarnessError.invalidConfiguration("state cleanup staging failed")
+        }
+        var stagedStatus = stat()
+        guard fstatat(rootFD, stagedDirectory, &stagedStatus, AT_SYMLINK_NOFOLLOW) == 0,
+              Identity(device: stagedStatus.st_dev, inode: stagedStatus.st_ino) == directoryIdentity,
+              stagedStatus.st_uid == getuid(), stagedStatus.st_mode & S_IFMT == S_IFDIR,
+              stagedStatus.st_mode & 0o7777 == 0o700 else {
+            _ = renameatx_np(rootFD, stagedDirectory, rootFD, name, UInt32(RENAME_EXCL))
+            throw E2ETestHarnessError.invalidConfiguration("state directory changed during cleanup")
+        }
+        guard unlinkat(rootFD, stagedDirectory, AT_REMOVEDIR) == 0 else {
+            _ = renameatx_np(rootFD, stagedDirectory, rootFD, name, UInt32(RENAME_EXCL))
+            throw E2ETestHarnessError.invalidConfiguration("state contains foreign files")
+        }
+    }
+}
+
 final class E2EDisposableKeyStore: @unchecked Sendable {
     private struct ResidualRecord: Codable {
         let schemaVersion: Int
@@ -331,6 +471,9 @@ final class E2EDisposableKeyStore: @unchecked Sendable {
     private let profileID: String
     private let approval: P256.Signing.PrivateKey
     private let denial: P256.Signing.PrivateKey
+    private static let approvalKeyName = "approval-private-key.raw"
+    private static let denialKeyName = "denial-private-key.raw"
+    private static let recordName = "profile-record.json"
 
     init(
         rootDirectory: URL, profileID: String, failWriteAfterBytes: Int? = nil,
@@ -347,42 +490,63 @@ final class E2EDisposableKeyStore: @unchecked Sendable {
             close(rootFD)
             throw E2ETestHarnessError.invalidConfiguration("harness root has the wrong owner")
         }
-        guard mkdirat(rootFD, profileID, 0o700) == 0 else {
-            close(rootFD)
-            throw Self.posixError("profile store already exists or cannot be created")
+        let createdDirectory = mkdirat(rootFD, profileID, 0o700) == 0
+        guard createdDirectory || errno == EEXIST else {
+            close(rootFD); throw Self.posixError("profile store cannot be created")
         }
         let directoryFD = openat(rootFD, profileID, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
         guard directoryFD >= 0 else {
-            _ = unlinkat(rootFD, profileID, AT_REMOVEDIR)
+            if createdDirectory { _ = unlinkat(rootFD, profileID, AT_REMOVEDIR) }
             close(rootFD)
             throw Self.posixError("could not open profile store")
         }
         var directoryStatus = stat()
         guard fstat(directoryFD, &directoryStatus) == 0, directoryStatus.st_uid == getuid(),
-              directoryStatus.st_mode & S_IFMT == S_IFDIR else {
-            close(directoryFD); _ = unlinkat(rootFD, profileID, AT_REMOVEDIR); close(rootFD)
+              directoryStatus.st_mode & S_IFMT == S_IFDIR,
+              directoryStatus.st_mode & 0o7777 == 0o700 else {
+            close(directoryFD)
+            if createdDirectory { _ = unlinkat(rootFD, profileID, AT_REMOVEDIR) }
+            close(rootFD)
             throw E2ETestHarnessError.invalidConfiguration("profile store is not owned")
         }
         rootDescriptor = rootFD
         directoryDescriptor = directoryFD
         directoryIdentity = ObjectIdentity(directoryStatus)
         self.profileID = profileID
-        approval = P256.Signing.PrivateKey()
-        denial = P256.Signing.PrivateKey()
         var created: [String: ObjectIdentity] = [:]
         do {
-            let record = ResidualRecord(
-                schemaVersion: 1, profileID: profileID,
-                approvalPublicKeyID: Data(SHA256.hash(data: approval.publicKey.x963Representation)),
-                denialPublicKeyID: Data(SHA256.hash(data: denial.publicKey.x963Representation))
-            )
-            created["profile-record.json"] = try Self.writeNew(
-                JSONEncoder().encode(record), named: "profile-record.json", in: directoryFD,
-                failAfterBytes: failWriteAfterBytes, failInitialIdentityCheck: failInitialIdentityCheck
-            )
+            if createdDirectory {
+                let approval = P256.Signing.PrivateKey()
+                let denial = P256.Signing.PrivateKey()
+                created[Self.approvalKeyName] = try Self.writeNew(
+                    approval.rawRepresentation, named: Self.approvalKeyName, in: directoryFD,
+                    failAfterBytes: failWriteAfterBytes, failInitialIdentityCheck: failInitialIdentityCheck
+                )
+                created[Self.denialKeyName] = try Self.writeNew(
+                    denial.rawRepresentation, named: Self.denialKeyName, in: directoryFD
+                )
+                let record = ResidualRecord(
+                    schemaVersion: 1, profileID: profileID,
+                    approvalPublicKeyID: Data(SHA256.hash(data: approval.publicKey.x963Representation)),
+                    denialPublicKeyID: Data(SHA256.hash(data: denial.publicKey.x963Representation))
+                )
+                created[Self.recordName] = try Self.writeNew(
+                    JSONEncoder().encode(record), named: Self.recordName, in: directoryFD
+                )
+                self.approval = approval
+                self.denial = denial
+            } else {
+                let loaded = try Self.loadExisting(profileID: profileID, directoryFD: directoryFD)
+                self.approval = loaded.approval
+                self.denial = loaded.denial
+                created = loaded.identities
+            }
         } catch {
-            for (name, identity) in created { try? Self.removeExact(name: name, identity: identity, in: directoryFD) }
-            close(directoryFD); _ = unlinkat(rootFD, profileID, AT_REMOVEDIR); close(rootFD)
+            if createdDirectory {
+                for (name, identity) in created { try? Self.removeExact(name: name, identity: identity, in: directoryFD) }
+                _ = unlinkat(rootFD, profileID, AT_REMOVEDIR)
+            }
+            close(directoryFD); close(rootFD)
             throw error
         }
         keyIdentities = created
@@ -443,6 +607,7 @@ final class E2EDisposableKeyStore: @unchecked Sendable {
     private func entryNames() throws -> [String] {
         guard let stream = fdopendir(dup(directoryDescriptor)) else { throw Self.posixError("profile scan failed") }
         defer { closedir(stream) }
+        rewinddir(stream)
         var names: [String] = []
         while let entry = readdir(stream) {
             let name = withUnsafePointer(to: entry.pointee.d_name) {
@@ -519,6 +684,62 @@ final class E2EDisposableKeyStore: @unchecked Sendable {
             }
             throw error
         }
+    }
+
+    private static func loadExisting(
+        profileID: String, directoryFD: Int32
+    ) throws -> (approval: P256.Signing.PrivateKey, denial: P256.Signing.PrivateKey,
+                 identities: [String: ObjectIdentity]) {
+        let expectedNames = [approvalKeyName, denialKeyName, recordName]
+        var identities: [String: ObjectIdentity] = [:]
+        var values: [String: Data] = [:]
+        for name in expectedNames {
+            let fd = openat(directoryFD, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+            guard fd >= 0 else { throw posixError("persisted test key is missing or unsafe") }
+            defer { close(fd) }
+            var status = stat()
+            guard fstat(fd, &status) == 0, status.st_uid == getuid(),
+                  status.st_mode & S_IFMT == S_IFREG, status.st_mode & 0o7777 == 0o600,
+                  status.st_nlink == 1, status.st_size > 0, status.st_size <= 16_384 else {
+                throw E2ETestHarnessError.invalidConfiguration("persisted test key is not private")
+            }
+            let data = try FileHandle(fileDescriptor: fd, closeOnDealloc: false).readToEnd() ?? Data()
+            guard data.count == Int(status.st_size) else {
+                throw E2ETestHarnessError.invalidConfiguration("persisted test key size changed")
+            }
+            identities[name] = ObjectIdentity(status)
+            values[name] = data
+        }
+        guard Set(try names(in: directoryFD)) == Set(expectedNames),
+              let approvalData = values[approvalKeyName], approvalData.count == 32,
+              let denialData = values[denialKeyName], denialData.count == 32,
+              let recordData = values[recordName] else {
+            throw E2ETestHarnessError.invalidConfiguration("persisted profile contains foreign data")
+        }
+        let approval = try P256.Signing.PrivateKey(rawRepresentation: approvalData)
+        let denial = try P256.Signing.PrivateKey(rawRepresentation: denialData)
+        let record = try JSONDecoder().decode(ResidualRecord.self, from: recordData)
+        guard record.schemaVersion == 1, record.profileID == profileID,
+              record.approvalPublicKeyID == Data(SHA256.hash(data: approval.publicKey.x963Representation)),
+              record.denialPublicKeyID == Data(SHA256.hash(data: denial.publicKey.x963Representation)),
+              record.approvalPublicKeyID != record.denialPublicKeyID else {
+            throw E2ETestHarnessError.invalidConfiguration("persisted key identities do not match")
+        }
+        return (approval, denial, identities)
+    }
+
+    private static func names(in directoryFD: Int32) throws -> [String] {
+        guard let stream = fdopendir(dup(directoryFD)) else { throw posixError("profile scan failed") }
+        defer { closedir(stream) }
+        rewinddir(stream)
+        var result: [String] = []
+        while let entry = readdir(stream) {
+            let name = withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
+            }
+            if name != "." && name != ".." { result.append(name) }
+        }
+        return result
     }
 
     private static func posixError(_ message: String) -> E2ETestHarnessError {

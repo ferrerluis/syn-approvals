@@ -297,7 +297,7 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
         try replacement.write(to: inbox.offerURL)
         let foreignGrant = Data("foreign grant".utf8)
         try foreignGrant.write(to: inbox.grantURL)
-        inbox.cleanupOwnedFiles()
+        try inbox.cleanupOwnedFiles()
         #expect(try Data(contentsOf: inbox.offerURL) == replacement)
         #expect(try Data(contentsOf: inbox.grantURL) == foreignGrant)
     }
@@ -308,7 +308,7 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
         let profile = "org.syn-approvals.SynE2E.no-offer"
         let inbox = try E2EGrantInbox(directory: root, profileID: profile)
         let directory = inbox.offerURL.deletingLastPathComponent()
-        inbox.cleanupOwnedFiles()
+        try inbox.cleanupOwnedFiles()
         #expect(!FileManager.default.fileExists(atPath: directory.path))
     }
     try withHarnessDirectory { root in
@@ -317,7 +317,7 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
         let directory = inbox.offerURL.deletingLastPathComponent()
         try inbox.publish(harnessRequest())
         try FileManager.default.removeItem(at: inbox.offerURL)
-        inbox.cleanupOwnedFiles()
+        try inbox.cleanupOwnedFiles()
         #expect(!FileManager.default.fileExists(atPath: directory.path))
     }
 }
@@ -399,21 +399,242 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
     }
 }
 
-@Test func disposableStoreRefusesReuseAndCleanupRemovesPrivateMaterial() throws {
+@Test func disposableStorePersistsExactKeysAcrossRelaunchAndCleansCrashResiduals() throws {
     try withHarnessDirectory { directory in
         let profile = "org.syn-approvals.SynE2E.case-e12"
-        let keys = try E2EDisposableKeyStore(rootDirectory: directory, profileID: profile)
+        var keys: E2EDisposableKeyStore? = try E2EDisposableKeyStore(
+            rootDirectory: directory, profileID: profile
+        )
         let store = directory.appendingPathComponent(profile)
         let files = try FileManager.default.contentsOfDirectory(atPath: store.path)
-        #expect(Set(files) == ["profile-record.json"])
-        #expect(keys.handoff.profileID == profile)
-        #expect(keys.handoff.approvalPublicKeyID == Data(SHA256.hash(data: keys.handoff.approvalPublicKey)))
-        #expect(keys.handoff.denialPublicKeyID == Data(SHA256.hash(data: keys.handoff.denialPublicKey)))
-        #expect(throws: E2ETestHarnessError.self) {
-            _ = try E2EDisposableKeyStore(rootDirectory: directory, profileID: profile)
-        }
-        try keys.cleanup()
+        #expect(Set(files) == ["approval-private-key.raw", "denial-private-key.raw", "profile-record.json"])
+        let first = try #require(keys).handoff
+        keys = nil // Model an app exit or crash without deleting the run-owned profile.
+        let relaunched = try E2EDisposableKeyStore(rootDirectory: directory, profileID: profile)
+        #expect(relaunched.handoff == first)
+        #expect(relaunched.handoff.approvalPublicKeyID == Data(SHA256.hash(data: first.approvalPublicKey)))
+        #expect(relaunched.handoff.denialPublicKeyID == Data(SHA256.hash(data: first.denialPublicKey)))
+        try relaunched.cleanup()
         #expect(FileManager.default.fileExists(atPath: directory.path))
         #expect(!FileManager.default.fileExists(atPath: store.path))
+    }
+}
+
+@Test func appProfileCompositionReopensAndFinalCleanupRemovesExactCrashResiduals() throws {
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.composition-relaunch"
+        var keys: E2EDisposableKeyStore? = try E2EDisposableKeyStore(rootDirectory: root, profileID: profile)
+        var inbox: E2EGrantInbox? = try E2EGrantInbox(directory: root, profileID: profile)
+        var state: E2EProfileState? = try E2EProfileState(rootDirectory: root, profileID: profile)
+        let first = try #require(keys).handoff
+        #expect(try #require(inbox).grantURL.lastPathComponent == "grant.json")
+        try Data("host-key\n".utf8).write(to: try #require(state).directory.appendingPathComponent("known_hosts"))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: try #require(state).directory.appendingPathComponent("known_hosts").path
+        )
+        keys = nil; inbox = nil; state = nil
+
+        let relaunchedKeys = try E2EDisposableKeyStore(rootDirectory: root, profileID: profile)
+        let relaunchedInbox = try E2EGrantInbox(directory: root, profileID: profile)
+        let relaunchedState = try E2EProfileState(rootDirectory: root, profileID: profile)
+        #expect(relaunchedKeys.handoff == first)
+        #expect(FileManager.default.fileExists(atPath: relaunchedState.directory.appendingPathComponent("known_hosts").path))
+
+        try relaunchedState.cleanup()
+        try relaunchedInbox.cleanupOwnedFiles()
+        try relaunchedKeys.cleanup()
+        for suffix in ["", ".inbox", ".state"] {
+            #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(profile + suffix).path))
+        }
+    }
+}
+
+@Test func finalCleanupRejectsRacingReplacementsAndPreservesTheirBytes() throws {
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.cleanup-race"
+        let inboxDirectory = root.appendingPathComponent(profile + ".inbox")
+        let offer = inboxDirectory.appendingPathComponent("offer.json")
+        let replacement = Data("foreign replacement".utf8)
+        let inbox = try E2EGrantInbox(directory: root, profileID: profile, beforeCleanupClaim: { name in
+            guard name == "offer.json" else { return }
+            try? FileManager.default.removeItem(at: offer)
+            FileManager.default.createFile(atPath: offer.path, contents: replacement)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: offer.path)
+        })
+        try inbox.publish(harnessRequest())
+        #expect(throws: E2ETestHarnessError.self) { try inbox.cleanupOwnedFiles(requireRemoval: true) }
+        #expect(try Data(contentsOf: offer) == replacement)
+    }
+
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.state-cleanup-race"
+        let stateDirectory = root.appendingPathComponent(profile + ".state")
+        let knownHosts = stateDirectory.appendingPathComponent("known_hosts")
+        let replacement = Data("foreign state replacement".utf8)
+        let state = try E2EProfileState(rootDirectory: root, profileID: profile, beforeCleanupClaim: { name in
+            guard name == "known_hosts" else { return }
+            try? FileManager.default.removeItem(at: knownHosts)
+            FileManager.default.createFile(atPath: knownHosts.path, contents: replacement)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: knownHosts.path)
+        })
+        FileManager.default.createFile(atPath: knownHosts.path, contents: Data("owned".utf8))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: knownHosts.path)
+        #expect(throws: E2ETestHarnessError.self) { try state.cleanup() }
+        #expect(try Data(contentsOf: knownHosts) == replacement)
+    }
+}
+
+@Test func finalCleanupPreservesReopenedAndDirectoryReplacements() throws {
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.reopened-race"
+        var writer: E2EGrantInbox? = try E2EGrantInbox(directory: root, profileID: profile)
+        try writer?.publish(harnessRequest()); writer = nil
+        let offer = root.appendingPathComponent(profile + ".inbox/offer.json")
+        let replacement = Data("reopened replacement".utf8)
+        let reopened = try E2EGrantInbox(directory: root, profileID: profile, beforeCleanupClaim: { name in
+            guard name == "offer.json" else { return }
+            try? FileManager.default.removeItem(at: offer)
+            FileManager.default.createFile(atPath: offer.path, contents: replacement)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: offer.path)
+        })
+        #expect(throws: E2ETestHarnessError.self) { try reopened.cleanupOwnedFiles(requireRemoval: true) }
+        #expect(try Data(contentsOf: offer) == replacement)
+    }
+
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.directory-race"
+        let inboxURL = root.appendingPathComponent(profile + ".inbox")
+        let displaced = root.appendingPathComponent("owned-inbox")
+        let sentinel = inboxURL.appendingPathComponent("sentinel")
+        let inbox = try E2EGrantInbox(directory: root, profileID: profile, beforeDirectoryCleanupClaim: {
+            try? FileManager.default.moveItem(at: inboxURL, to: displaced)
+            try? FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: false)
+            FileManager.default.createFile(atPath: sentinel.path, contents: Data("keep".utf8))
+        })
+        #expect(throws: E2ETestHarnessError.self) { try inbox.cleanupOwnedFiles(requireRemoval: true) }
+        #expect(try Data(contentsOf: sentinel) == Data("keep".utf8))
+    }
+
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.state-directory-race"
+        let stateURL = root.appendingPathComponent(profile + ".state")
+        let displaced = root.appendingPathComponent("owned-state")
+        let sentinel = stateURL.appendingPathComponent("sentinel")
+        let state = try E2EProfileState(rootDirectory: root, profileID: profile, beforeDirectoryCleanupClaim: {
+            try? FileManager.default.moveItem(at: stateURL, to: displaced)
+            try? FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: false)
+            FileManager.default.createFile(atPath: sentinel.path, contents: Data("keep".utf8))
+        })
+        #expect(throws: E2ETestHarnessError.self) { try state.cleanup() }
+        #expect(try Data(contentsOf: sentinel) == Data("keep".utf8))
+    }
+}
+
+@Test func failedReopenPreservesPreexistingInboxAndStateObjects() throws {
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.failed-reopen"
+        for suffix in [".inbox", ".state"] {
+            let path = root.appendingPathComponent(profile + suffix)
+            let bytes = Data("foreign".utf8)
+            FileManager.default.createFile(atPath: path.path, contents: bytes)
+            if suffix == ".inbox" {
+                #expect(throws: E2ETestHarnessError.self) { _ = try E2EGrantInbox(directory: root, profileID: profile) }
+            } else {
+                #expect(throws: E2ETestHarnessError.self) { _ = try E2EProfileState(rootDirectory: root, profileID: profile) }
+            }
+            #expect(try Data(contentsOf: path) == bytes)
+            try FileManager.default.removeItem(at: path)
+        }
+    }
+}
+
+@Test func finalCleanupRejectsMetadataChangesBeforeStagedDeletion() throws {
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.file-mode-race"
+        let offer = root.appendingPathComponent(profile + ".inbox/offer.json")
+        let inbox = try E2EGrantInbox(directory: root, profileID: profile, beforeCleanupClaim: { name in
+            if name == "offer.json" { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: offer.path) }
+        })
+        try inbox.publish(harnessRequest())
+        #expect(throws: E2ETestHarnessError.self) { try inbox.cleanupOwnedFiles(requireRemoval: true) }
+        #expect(FileManager.default.fileExists(atPath: offer.path))
+    }
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.directory-mode-race"
+        let directory = root.appendingPathComponent(profile + ".state")
+        let state = try E2EProfileState(rootDirectory: root, profileID: profile, beforeDirectoryCleanupClaim: {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        })
+        #expect(throws: E2ETestHarnessError.self) { try state.cleanup() }
+        #expect(FileManager.default.fileExists(atPath: directory.path))
+    }
+}
+
+@Test func persistedKeyStoreRejectsMalformedUnsafeAndForeignEntriesWithoutOverwriting() throws {
+    for (profile, mutate) in [
+        ("org.syn-approvals.SynE2E.malformed-key", { (store: URL) in
+            let key = store.appendingPathComponent("approval-private-key.raw")
+            try Data(repeating: 7, count: 31).write(to: key)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: key.path)
+        }),
+        ("org.syn-approvals.SynE2E.unsafe-mode", { (store: URL) in
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o644], ofItemAtPath: store.appendingPathComponent("denial-private-key.raw").path
+            )
+        }),
+        ("org.syn-approvals.SynE2E.unsafe-profile-mode", { (store: URL) in
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: store.path)
+        }),
+        ("org.syn-approvals.SynE2E.identity-mismatch", { (store: URL) in
+            let record = store.appendingPathComponent("profile-record.json")
+            var value = try #require(
+                try JSONSerialization.jsonObject(with: Data(contentsOf: record)) as? [String: Any]
+            )
+            value["approvalPublicKeyID"] = Data(repeating: 0, count: 32).base64EncodedString()
+            try JSONSerialization.data(withJSONObject: value).write(to: record)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: record.path)
+        }),
+        ("org.syn-approvals.SynE2E.foreign-entry", { (store: URL) in
+            #expect(FileManager.default.createFile(
+                atPath: store.appendingPathComponent("foreign").path, contents: Data([1])
+            ))
+        }),
+    ] {
+        try withHarnessDirectory { root in
+            var initial: E2EDisposableKeyStore? = try E2EDisposableKeyStore(
+                rootDirectory: root, profileID: profile
+            )
+            let store = root.appendingPathComponent(profile)
+            initial = nil
+            try mutate(store)
+            #expect(throws: Error.self) {
+                _ = try E2EDisposableKeyStore(rootDirectory: root, profileID: profile)
+            }
+            #expect(FileManager.default.fileExists(atPath: store.path))
+            _ = initial
+        }
+    }
+}
+
+@Test func persistedKeyStoreRejectsSymlinkedKeyAndPreservesExternalTarget() throws {
+    try withHarnessDirectory { root in
+        let profile = "org.syn-approvals.SynE2E.symlink-key"
+        var initial: E2EDisposableKeyStore? = try E2EDisposableKeyStore(
+            rootDirectory: root, profileID: profile
+        )
+        let store = root.appendingPathComponent(profile)
+        let key = store.appendingPathComponent("approval-private-key.raw")
+        let external = root.appendingPathComponent("external-key")
+        let sentinel = Data(repeating: 9, count: 32)
+        try sentinel.write(to: external)
+        try FileManager.default.removeItem(at: key)
+        try FileManager.default.createSymbolicLink(at: key, withDestinationURL: external)
+        initial = nil
+        #expect(throws: Error.self) {
+            _ = try E2EDisposableKeyStore(rootDirectory: root, profileID: profile)
+        }
+        #expect(try Data(contentsOf: external) == sentinel)
+        _ = initial
     }
 }

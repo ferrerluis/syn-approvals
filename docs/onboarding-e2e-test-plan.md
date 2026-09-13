@@ -56,7 +56,7 @@ The test app uses a distinct identity/profile and temporary approver keys. Pair 
 
 Build each temporary test app against that candidate's exact clean production checkout, with its validated release metadata and matching remote source/helper artifacts. Shared test-only code may come from the harness checkout; shipping source must come from the candidate being tested. Record both revisions. Development/invalid identity labels, missing installer resources or a B production build relabeled as A cannot pass a candidate test.
 
-The local empty-state smoke uses in-memory startup preferences, suppressed notifications and process-only test keys. These do **not** prove real login-item registration, notification delivery or pairing across relaunch. Keep those E03/E05 assertions open until exercised through the shipping app and verified against macOS, without spending additional real approvals. Do not count a simulated switch or retained target JSON as proof of the OS setting or paired-key persistence.
+The local empty-state smoke uses in-memory startup preferences, suppressed notifications and disposable test keys persisted only inside the run-owned isolated profile. Relaunch continuity of those test keys can support A's test pairing, but it does **not** prove production Keychain identity continuity, real login-item registration or notification delivery. Prove production Keychain continuity with final shipping B in E05/E12, without spending additional real approvals; do not count a simulated switch or retained target JSON as proof of the OS setting or production identity persistence.
 
 Before enabling the harness, resolve the four P2 findings in the [September 12 review](validation/2026-09-12-test-harness-review.md) and pass these automated regressions:
 
