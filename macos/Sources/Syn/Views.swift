@@ -295,7 +295,7 @@ private struct SetupView: View {
     private var setupAuthorization: some View {
         if let command = model.maintenanceBootstrapCommand {
             Text("One-time setup on this machine").font(.headline)
-            Text("Run this command in a trusted administrator terminal on the remote machine. Use a session that your agents cannot control. Enter the machine's password there if asked.")
+            Text("Run this command in a trusted administrator terminal on the remote machine. Use a session that your agents cannot control. Authenticate there if prompted.")
                 .font(.callout)
             Text(command).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
             Button("Copy setup command") {
