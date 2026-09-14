@@ -295,7 +295,7 @@ final class SynModel: ObservableObject {
                 }.value
                 let request = try RemoteOnboardingRequest.make(
                     settings: settings,
-                    resolvedHostname: settings.hostname,
+                    resolvedHostname: checkedSetup.transportHostname,
                     listenIP: listenIP,
                     displayName: displayName,
                     targetID: targetID,
