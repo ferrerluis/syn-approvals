@@ -66,7 +66,7 @@ done
 ln -s "$repo_dir/macos/Tests/SynTests/E2ETestApprovalHarness.swift" "$sources/E2ETestApprovalHarness.swift"
 ln -s "$repo_dir/macos/Tests/SynE2EApp/SynE2EApp.swift" "$sources/SynE2EApp.swift"
 for resource in "$production_root"/macos/Sources/Syn/Resources/Branding/*; do
-    ln -s "$resource" "$sources/Resources/Branding/$(basename "$resource")"
+    install -m 0644 "$resource" "$sources/Resources/Branding/$(basename "$resource")"
 done
 
 cp "$production_root/macos/Package.swift" "$stage/Package.swift"
@@ -96,6 +96,11 @@ cat > "$staged_app/Contents/Info.plist" <<'PLIST'
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 </dict></plist>
 PLIST
+
+# SwiftPM signs its standalone executable before the harness adds the app bundle resources.
+# Sign the complete bundle so the executable and every sealed resource belong to one valid app.
+/usr/bin/codesign --force --sign - "$staged_app"
+/usr/bin/codesign --verify --strict --deep --verbose=2 "$staged_app"
 
 swift build --package-path "$production_root/macos" --scratch-path "$stage/production-build" -c release --product Syn
 production="$stage/production-build/release/Syn"

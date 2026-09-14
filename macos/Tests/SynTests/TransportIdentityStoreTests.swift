@@ -180,6 +180,21 @@ private let clientAuthOID = Data([0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02
     #expect(TransportIdentityStore.valid(generated, label: label))
 }
 
+@Test func e2eProfilePrefixFitsFreshTargetInCertificateAndIsolatesProfiles() throws {
+    let firstProfile = "org.syn-approvals.SynE2E.case-e03-with-realistic-long-profile-identifier"
+    let secondProfile = firstProfile + "-other"
+    let firstPrefix = E2ETransportIdentity.labelPrefix(profileID: firstProfile)
+    let secondPrefix = E2ETransportIdentity.labelPrefix(profileID: secondProfile)
+    #expect(firstPrefix.utf8.count == 14)
+    #expect(firstPrefix != secondPrefix)
+
+    let freshTargetID = "target_" + String(repeating: "a", count: 32)
+    let label = try TransportIdentityStore.label(for: freshTargetID, prefix: firstPrefix)
+    #expect(label.utf8.count == 64)
+    let generated = try MacTransportIdentityBackend.generatedMaterialForTesting(label: label)
+    #expect(TransportIdentityStore.valid(generated, label: label))
+}
+
 private func identityMaterial(
     label: String,
     certificate: Data = Data([0x30, 0x03, 0x02, 0x01, 0x01]),

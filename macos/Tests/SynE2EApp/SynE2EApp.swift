@@ -76,7 +76,9 @@ struct SynE2EApp: App {
                 targetStore: targets,
                 startupPreference: StartupPreference(defaults: defaults, service: E2ELoginItem()),
                 notifications: E2ENotifications(),
-                transportIdentityStore: TransportIdentityStore(labelPrefix: "SynE2E \(profileID)"),
+                transportIdentityStore: TransportIdentityStore(
+                    labelPrefix: E2ETransportIdentity.labelPrefix(profileID: profileID)
+                ),
                 verifiedRequestObserver: { try inbox.publish($0) }
             ))
             appDelegate.own(
