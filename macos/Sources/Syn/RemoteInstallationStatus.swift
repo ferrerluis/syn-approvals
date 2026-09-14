@@ -90,6 +90,9 @@ struct RemoteMachinePreflight: Equatable, Sendable {
     let settings: SSHConnectionSettings
     let serverAddress: String
     let installation: RemoteMachineInstallation
+
+    /// The peer address reported by the established SSH connection, not a user-facing SSH alias.
+    var transportHostname: String { serverAddress }
 }
 
 protocol MachineSetupChecking: Sendable {

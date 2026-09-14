@@ -103,6 +103,17 @@ private func waitForSetup(_ model: SynModel) async throws {
     #expect(installedModel.addMachineState == .installed(releaseID: "20260906160000", configuration: "configured"))
 }
 
+@Test func checkedMachineUsesVerifiedSSHPeerForTransportWithoutReplacingSSHHost() {
+    for sshHost in ["pi", "pi.example"] {
+        let settings = SSHConnectionSettings(hostname: sshHost, username: "developer", port: 2222)
+        let checked = RemoteMachinePreflight(
+            settings: settings, serverAddress: "100.99.102.171", installation: .notInstalled
+        )
+        #expect(checked.transportHostname == "100.99.102.171")
+        #expect(checked.settings.hostname == sshHost)
+    }
+}
+
 @Test @MainActor func addMachineFailureCanRetryAndCancellationIsQuiet() async throws {
     let failed = SetupCheckerFixture(.failure(.unavailable))
     let model = SynModel(startServices: false, setupChecker: failed)
