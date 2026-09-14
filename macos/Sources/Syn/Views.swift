@@ -302,7 +302,7 @@ private struct SetupView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(command, forType: .string)
             }
-            Text("This authorizes this Mac to install and update Syn through a restricted SSH key. Future updates stay in Syn; your administrator password is never sent by the app.")
+            Text("This authorizes this Mac to install and update Syn through a restricted SSH key. Future updates reuse this restricted access; your administrator password is never sent by the app.")
                 .font(.callout).foregroundStyle(.secondary)
         }
         Button(model.maintenanceBootstrapCommand == nil ? "Install or update Syn" : "I've run the command — continue") {
