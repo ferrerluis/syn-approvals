@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
@@ -581,17 +581,7 @@ fn verify_sshd_and_root_shell() -> Result<()> {
     ) {
         bail!("root account does not have a usable login shell");
     }
-    for parent in shell
-        .ancestors()
-        .skip(1)
-        .take_while(|path| *path != Path::new("/"))
-    {
-        verify_root_directory(parent)?;
-    }
-    let meta = fs::symlink_metadata(&shell)?;
-    if !meta.is_file() || meta.uid() != 0 || meta.mode() & 0o022 != 0 || meta.mode() & 0o111 == 0 {
-        bail!("root login shell is not trusted executable state");
-    }
+    verify_root_shell_path(&shell)?;
     let output = Command::new("/usr/sbin/sshd")
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
@@ -611,6 +601,76 @@ fn verify_sshd_and_root_shell() -> Result<()> {
             && l.contains(".ssh/authorized_keys")
     }) {
         bail!("sshd does not use root's standard authorized_keys file");
+    }
+    Ok(())
+}
+
+fn verify_root_shell_path(shell: &Path) -> Result<()> {
+    verify_shell_path_owned_by(shell, Path::new("/"), 0, 0)
+}
+
+fn verify_shell_path_owned_by(shell: &Path, boundary: &Path, uid: u32, gid: u32) -> Result<()> {
+    if !shell.is_absolute()
+        || !boundary.is_absolute()
+        || shell
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        bail!("root login shell path is unsafe");
+    }
+    let boundary_meta = fs::symlink_metadata(boundary)?;
+    if !boundary_meta.is_dir()
+        || boundary_meta.uid() != uid
+        || boundary_meta.gid() != gid
+        || boundary_meta.mode() & 0o022 != 0
+    {
+        bail!("root login shell trust root is not protected");
+    }
+
+    let relative = shell
+        .strip_prefix(boundary)
+        .map_err(|_| anyhow::anyhow!("root login shell path is unsafe"))?;
+    let mut components = relative.components();
+    let resolved = if components.next() == Some(Component::Normal(std::ffi::OsStr::new("bin"))) {
+        let bin = boundary.join("bin");
+        let meta = fs::symlink_metadata(&bin)?;
+        if meta.file_type().is_symlink() {
+            let target = fs::read_link(&bin)?;
+            let trusted_absolute = boundary.join("usr/bin");
+            if meta.uid() != uid
+                || meta.gid() != gid
+                || (target != Path::new("usr/bin") && target != trusted_absolute)
+            {
+                bail!("root login shell uses an untrusted /bin link");
+            }
+            components.fold(boundary.join("usr/bin"), |path, component| {
+                path.join(component.as_os_str())
+            })
+        } else {
+            shell.to_path_buf()
+        }
+    } else {
+        shell.to_path_buf()
+    };
+
+    for parent in resolved
+        .ancestors()
+        .skip(1)
+        .take_while(|path| *path != boundary)
+    {
+        let meta = fs::symlink_metadata(parent)?;
+        if !meta.is_dir() || meta.uid() != uid || meta.gid() != gid || meta.mode() & 0o022 != 0 {
+            bail!("root login shell parent is not trusted");
+        }
+    }
+    let meta = fs::symlink_metadata(&resolved)?;
+    if !meta.is_file()
+        || meta.uid() != uid
+        || meta.gid() != gid
+        || meta.mode() & 0o022 != 0
+        || meta.mode() & 0o111 == 0
+    {
+        bail!("root login shell is not trusted executable state");
     }
     Ok(())
 }
@@ -822,8 +882,32 @@ fn validate_hex(value: &str, length: usize, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     const OP: &str = "0123456789abcdef0123456789abcdef";
     const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn shell_fixture(absolute_link: bool) -> (PathBuf, u32, u32) {
+        let root = std::env::temp_dir().join(format!(
+            "syn-shell-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("usr")).unwrap();
+        fs::create_dir(root.join("usr/bin")).unwrap();
+        fs::write(root.join("usr/bin/bash"), b"test shell").unwrap();
+        fs::set_permissions(root.join("usr/bin/bash"), fs::Permissions::from_mode(0o755)).unwrap();
+        let target = if absolute_link {
+            root.join("usr/bin")
+        } else {
+            PathBuf::from("usr/bin")
+        };
+        std::os::unix::fs::symlink(target, root.join("bin")).unwrap();
+        let meta = fs::symlink_metadata(&root).unwrap();
+        (root, meta.uid(), meta.gid())
+    }
 
     #[test]
     fn parses_cross_language_maintenance_vectors() {
@@ -937,5 +1021,60 @@ mod tests {
         std::os::unix::fs::symlink("missing", root.join("helper")).unwrap();
         assert!(verify_protected_file(&root.join("helper"), None, 100).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn accepts_relative_and_absolute_usrmerge_root_shell_links() {
+        for absolute_link in [false, true] {
+            let (root, uid, gid) = shell_fixture(absolute_link);
+            assert!(verify_shell_path_owned_by(&root.join("bin/bash"), &root, uid, gid).is_ok());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn accepts_root_shell_in_real_bin_directory() {
+        let (root, uid, gid) = shell_fixture(false);
+        fs::remove_file(root.join("bin")).unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
+        fs::copy(root.join("usr/bin/bash"), root.join("bin/bash")).unwrap();
+        assert!(verify_shell_path_owned_by(&root.join("bin/bash"), &root, uid, gid).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_usrmerge_shell_with_writable_resolved_parent() {
+        let (root, uid, gid) = shell_fixture(false);
+        fs::set_permissions(root.join("usr/bin"), fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(verify_shell_path_owned_by(&root.join("bin/bash"), &root, uid, gid).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_usrmerge_shell_with_wrong_bin_target() {
+        let (root, uid, gid) = shell_fixture(false);
+        fs::remove_file(root.join("bin")).unwrap();
+        std::os::unix::fs::symlink("usr/local/bin", root.join("bin")).unwrap();
+        assert!(verify_shell_path_owned_by(&root.join("bin/bash"), &root, uid, gid).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_usrmerge_shell_with_chained_bin_target() {
+        let (root, uid, gid) = shell_fixture(false);
+        fs::remove_file(root.join("bin")).unwrap();
+        fs::create_dir(root.join("alias")).unwrap();
+        std::os::unix::fs::symlink("../usr/bin", root.join("alias/bin")).unwrap();
+        std::os::unix::fs::symlink("alias/bin", root.join("bin")).unwrap();
+        assert!(verify_shell_path_owned_by(&root.join("bin/bash"), &root, uid, gid).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_non_executable_usrmerge_shell() {
+        let (root, uid, gid) = shell_fixture(false);
+        fs::set_permissions(root.join("usr/bin/bash"), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(verify_shell_path_owned_by(&root.join("bin/bash"), &root, uid, gid).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }
