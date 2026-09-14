@@ -218,7 +218,7 @@ private struct SetupView: View {
                         .foregroundStyle(.green)
                     setupAuthorization
                 case .updateRequired:
-                    Label("An older Syn installation was found. Update required.", systemImage: "arrow.triangle.2.circlepath")
+                    Label("A Syn installation was found. Update required.", systemImage: "arrow.triangle.2.circlepath")
                         .foregroundStyle(.orange)
                     setupAuthorization
                 case let .confirmHost(candidate):
