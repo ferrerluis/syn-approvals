@@ -89,10 +89,18 @@ enum RemoteMachineInstallation: Equatable, Sendable {
 struct RemoteMachinePreflight: Equatable, Sendable {
     let settings: SSHConnectionSettings
     let serverAddress: String
+    let transportHostname: String
     let installation: RemoteMachineInstallation
 
-    /// The peer address reported by the established SSH connection, not a user-facing SSH alias.
-    var transportHostname: String { serverAddress }
+    init(
+        settings: SSHConnectionSettings, serverAddress: String,
+        transportHostname: String? = nil, installation: RemoteMachineInstallation
+    ) {
+        self.settings = settings
+        self.serverAddress = serverAddress
+        self.transportHostname = transportHostname ?? settings.hostname
+        self.installation = installation
+    }
 }
 
 protocol MachineSetupChecking: Sendable {
@@ -102,13 +110,16 @@ protocol MachineSetupChecking: Sendable {
 struct SSHMachineSetupChecker: MachineSetupChecking {
     let probe: SSHSetupProbe
     let expectedRelease: ReleaseIdentity
+    let routeResolver: any SSHMaintenanceRouteResolving
 
     init(
         probe: SSHSetupProbe = SSHSetupProbe(),
-        expectedRelease: ReleaseIdentity = .current
+        expectedRelease: ReleaseIdentity = .current,
+        routeResolver: any SSHMaintenanceRouteResolving = SystemSSHMaintenanceRouteResolver()
     ) {
         self.probe = probe
         self.expectedRelease = expectedRelease
+        self.routeResolver = routeResolver
     }
 
     func check(_ settings: SSHConnectionSettings) async throws -> RemoteMachinePreflight {
@@ -116,17 +127,20 @@ struct SSHMachineSetupChecker: MachineSetupChecking {
         try Task.checkCancellation()
         let connection = try await probe.runner.run(settings: settings, operation: .connection)
         let serverAddress = try Self.parseServerAddress(connection)
+        let transportHostname = try await routeResolver.resolve(settings).hostname
         try Task.checkCancellation()
         let output = try await probe.runner.run(settings: settings, operation: .status)
         try Task.checkCancellation()
         if output.status == 127, output.stdout.isEmpty {
             return RemoteMachinePreflight(
-                settings: settings, serverAddress: serverAddress, installation: .notInstalled
+                settings: settings, serverAddress: serverAddress,
+                transportHostname: transportHostname, installation: .notInstalled
             )
         }
         if RemoteInstallationStatus.isLegacyStatus(output) {
             return RemoteMachinePreflight(
                 settings: settings, serverAddress: serverAddress,
+                transportHostname: transportHostname,
                 installation: .updateRequired(nil)
             )
         }
@@ -134,7 +148,8 @@ struct SSHMachineSetupChecker: MachineSetupChecking {
         let installation: RemoteMachineInstallation = status.configuration == .configured
             && status.release == expectedRelease ? .installed(status) : .updateRequired(status)
         return RemoteMachinePreflight(
-            settings: settings, serverAddress: serverAddress, installation: installation
+            settings: settings, serverAddress: serverAddress,
+            transportHostname: transportHostname, installation: installation
         )
     }
 
