@@ -468,29 +468,16 @@ fn ssh_field(bytes: &[u8], offset: usize) -> Result<&[u8]> {
 fn install_authorized_entry(entry: &str) -> Result<()> {
     create_root_dir(Path::new("/root/.ssh"), 0o700)?;
     if Path::new(AUTHORIZED_KEYS).try_exists()? {
-        verify_protected_file(Path::new(AUTHORIZED_KEYS), Some(0o600), 1024 * 1024)?;
+        verify_authorized_keys_file(Path::new(AUTHORIZED_KEYS))?;
         let text = fs::read_to_string(AUTHORIZED_KEYS)?;
-        let tagged: Vec<_> = text
-            .lines()
-            .filter(|line| line.ends_with(KEY_TAG))
-            .collect();
-        if tagged.iter().any(|line| *line != entry) {
-            bail!("a different Syn maintenance key entry already exists");
-        }
-        if tagged.len() > 1 {
-            bail!("duplicate Syn maintenance key entries exist");
-        }
-        if tagged.len() == 1 {
+        let Some(append) = authorized_entry_append(&text, entry)? else {
             return Ok(());
-        }
+        };
         let mut file = OpenOptions::new()
             .append(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(AUTHORIZED_KEYS)?;
-        if !text.is_empty() && !text.ends_with('\n') {
-            file.write_all(b"\n")?;
-        }
-        writeln!(file, "{entry}")?;
+        file.write_all(append.as_bytes())?;
         file.sync_all()?;
         return Ok(());
     }
@@ -504,9 +491,39 @@ fn install_authorized_entry(entry: &str) -> Result<()> {
     Ok(())
 }
 
+fn authorized_entry_append(text: &str, entry: &str) -> Result<Option<String>> {
+    let tagged: Vec<_> = text
+        .lines()
+        .filter(|line| line.ends_with(KEY_TAG))
+        .collect();
+    if tagged.iter().any(|line| *line != entry) {
+        bail!("a different Syn maintenance key entry already exists");
+    }
+    if tagged.len() > 1 {
+        bail!("duplicate Syn maintenance key entries exist");
+    }
+    if tagged.len() == 1 {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{}{}\n",
+        if !text.is_empty() && !text.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        },
+        entry
+    )))
+}
+
 fn remove_exact_authorized_entry(entry: &str) -> Result<()> {
     verify_protected_file(Path::new(AUTHORIZED_KEYS), Some(0o600), 1024 * 1024)?;
     let text = fs::read_to_string(AUTHORIZED_KEYS)?;
+    let updated = without_exact_authorized_entry(&text, entry)?;
+    atomic_write(Path::new(AUTHORIZED_KEYS), updated.as_bytes(), 0o600)
+}
+
+fn without_exact_authorized_entry(text: &str, entry: &str) -> Result<String> {
     let mut removed = 0;
     let kept: Vec<_> = text
         .lines()
@@ -522,16 +539,11 @@ fn remove_exact_authorized_entry(entry: &str) -> Result<()> {
     if removed != 1 {
         bail!("exact installed maintenance key entry was not found once");
     }
-    atomic_write(
-        Path::new(AUTHORIZED_KEYS),
-        format!(
-            "{}{}",
-            kept.join("\n"),
-            if kept.is_empty() { "" } else { "\n" }
-        )
-        .as_bytes(),
-        0o600,
-    )
+    Ok(format!(
+        "{}{}",
+        kept.join("\n"),
+        if kept.is_empty() { "" } else { "\n" }
+    ))
 }
 
 fn load_config() -> Result<Config> {
@@ -735,6 +747,19 @@ fn verify_protected_file(
     exact_mode: Option<u32>,
     maximum: u64,
 ) -> Result<fs::Metadata> {
+    verify_protected_file_state(path, exact_mode, maximum, false)
+}
+
+fn verify_authorized_keys_file(path: &Path) -> Result<fs::Metadata> {
+    verify_protected_file_state(path, Some(0o600), 1024 * 1024, true)
+}
+
+fn verify_protected_file_state(
+    path: &Path,
+    exact_mode: Option<u32>,
+    maximum: u64,
+    allow_empty: bool,
+) -> Result<fs::Metadata> {
     for parent in path
         .ancestors()
         .skip(1)
@@ -743,19 +768,28 @@ fn verify_protected_file(
         verify_root_directory(parent)?;
     }
     let meta = fs::symlink_metadata(path)?;
-    if !meta.is_file()
-        || meta.uid() != 0
-        || meta.gid() != 0
-        || meta.mode() & 0o022 != 0
-        || meta.len() == 0
-        || meta.len() > maximum
-    {
+    if !protected_file_metadata(&meta, maximum, allow_empty, 0, 0) {
         bail!("{} is not a protected root-owned file", path.display());
     }
     if exact_mode.is_some_and(|mode| meta.mode() & 0o7777 != mode) {
         bail!("{} has an unsafe mode", path.display());
     }
     Ok(meta)
+}
+
+fn protected_file_metadata(
+    meta: &fs::Metadata,
+    maximum: u64,
+    allow_empty: bool,
+    uid: u32,
+    gid: u32,
+) -> bool {
+    meta.is_file()
+        && meta.uid() == uid
+        && meta.gid() == gid
+        && meta.mode() & 0o022 == 0
+        && (allow_empty || meta.len() != 0)
+        && meta.len() <= maximum
 }
 
 fn open_user_file(path: &Path, uid: u32, size: u64) -> Result<File> {
@@ -1021,6 +1055,79 @@ mod tests {
         std::os::unix::fs::symlink("missing", root.join("helper")).unwrap();
         assert!(verify_protected_file(&root.join("helper"), None, 100).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_authorized_keys_install_revoke_reinstall_lifecycle() {
+        let entry = "restrict ssh-ed25519 test syn-maintenance-v1";
+        let installed = authorized_entry_append("", entry).unwrap().unwrap();
+        assert_eq!(installed, format!("{entry}\n"));
+        assert!(authorized_entry_append(&installed, entry)
+            .unwrap()
+            .is_none());
+
+        let revoked = without_exact_authorized_entry(&installed, entry).unwrap();
+        assert!(revoked.is_empty());
+        assert_eq!(
+            authorized_entry_append(&revoked, entry).unwrap().unwrap(),
+            format!("{entry}\n")
+        );
+    }
+
+    #[test]
+    fn only_authorized_keys_may_use_protected_empty_file_state() {
+        let root = std::env::temp_dir().join(format!(
+            "syn-authorized-keys-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("authorized_keys");
+        fs::write(&path, []).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let meta = fs::symlink_metadata(&path).unwrap();
+        assert!(protected_file_metadata(
+            &meta,
+            1024 * 1024,
+            true,
+            meta.uid(),
+            meta.gid()
+        ));
+        assert!(!protected_file_metadata(
+            &meta,
+            1024 * 1024,
+            false,
+            meta.uid(),
+            meta.gid()
+        ));
+        assert!(!protected_file_metadata(
+            &meta,
+            1024 * 1024,
+            true,
+            meta.uid() + 1,
+            meta.gid()
+        ));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o622)).unwrap();
+        let writable = fs::symlink_metadata(&path).unwrap();
+        assert!(!protected_file_metadata(
+            &writable,
+            1024 * 1024,
+            true,
+            writable.uid(),
+            writable.gid()
+        ));
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        let symlink = fs::symlink_metadata(&path).unwrap();
+        assert!(!protected_file_metadata(
+            &symlink,
+            1024 * 1024,
+            true,
+            symlink.uid(),
+            symlink.gid()
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
