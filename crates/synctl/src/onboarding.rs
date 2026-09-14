@@ -532,6 +532,7 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
     if !apply {
         return Ok(report);
     }
+    ensure_build_root()?;
     ensure_build_account()?;
     if !missing.is_empty() {
         run_quiet("/usr/bin/apt-get", &["update"])?;
@@ -539,7 +540,6 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
         arguments.extend(BUILD_DEPENDENCIES.iter().copied());
         run_quiet("/usr/bin/apt-get", &arguments)?;
     }
-    ensure_build_root()?;
     let work = Path::new(BUILD_ROOT).join(operation_id);
     if work.exists() || work.is_symlink() {
         bail!("build workspace already exists; recover or use a new operation");
@@ -1245,16 +1245,27 @@ fn ensure_build_account() -> Result<()> {
 }
 
 fn ensure_build_root() -> Result<()> {
-    let path = Path::new(BUILD_ROOT);
+    ensure_build_root_at(Path::new(BUILD_ROOT), 0, 0)
+}
+
+fn ensure_build_root_at(path: &Path, uid: u32, gid: u32) -> Result<()> {
     match fs::create_dir(path) {
         Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o711))?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error.into()),
     }
-    let metadata = fs::symlink_metadata(path)?;
+    let mut metadata = fs::symlink_metadata(path)?;
+    if metadata.is_dir()
+        && metadata.uid() == uid
+        && metadata.gid() == gid
+        && metadata.mode() & 0o7777 == 0o755
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o711))?;
+        metadata = fs::symlink_metadata(path)?;
+    }
     if !metadata.is_dir()
-        || metadata.uid() != 0
-        || metadata.gid() != 0
+        || metadata.uid() != uid
+        || metadata.gid() != gid
         || metadata.mode() & 0o7777 != 0o711
     {
         bail!("build root must be a root-owned directory with mode 0711");
@@ -2711,6 +2722,56 @@ mod tests {
             b"992 27\n"
         )
         .is_err());
+    }
+
+    #[test]
+    fn build_root_recovers_exact_trusted_adduser_scaffold() {
+        let directory = Directory::new();
+        let metadata = fs::symlink_metadata(&directory.0).unwrap();
+        let build_root = directory.0.join("syn-build");
+        fs::create_dir(&build_root).unwrap();
+        fs::set_permissions(&build_root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_build_root_at(&build_root, metadata.uid(), metadata.gid()).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&build_root).unwrap().mode() & 0o7777,
+            0o711
+        );
+        ensure_build_root_at(&build_root, metadata.uid(), metadata.gid()).unwrap();
+    }
+
+    #[test]
+    fn build_root_is_protected_before_first_account_home_is_created() {
+        let directory = Directory::new();
+        let metadata = fs::symlink_metadata(&directory.0).unwrap();
+        let build_root = directory.0.join("syn-build");
+
+        ensure_build_root_at(&build_root, metadata.uid(), metadata.gid()).unwrap();
+        fs::create_dir(build_root.join("home")).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(&build_root).unwrap().mode() & 0o7777,
+            0o711
+        );
+    }
+
+    #[test]
+    fn build_root_rejects_writable_wrong_owner_and_symlink_state() {
+        let directory = Directory::new();
+        let metadata = fs::symlink_metadata(&directory.0).unwrap();
+        for mode in [0o700, 0o733, 0o777] {
+            let path = directory.0.join(format!("mode-{mode:o}"));
+            fs::create_dir(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(ensure_build_root_at(&path, metadata.uid(), metadata.gid()).is_err());
+        }
+        let wrong_owner = directory.0.join("wrong-owner");
+        fs::create_dir(&wrong_owner).unwrap();
+        fs::set_permissions(&wrong_owner, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_build_root_at(&wrong_owner, metadata.uid() + 1, metadata.gid()).is_err());
+
+        let link = directory.0.join("link");
+        std::os::unix::fs::symlink(&wrong_owner, &link).unwrap();
+        assert!(ensure_build_root_at(&link, metadata.uid(), metadata.gid()).is_err());
     }
 
     #[cfg(target_os = "linux")]
