@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -834,7 +834,12 @@ fn command_stdout(program: &str, arguments: &[&str]) -> Result<String> {
 }
 
 fn run(program: &str, arguments: &[&str]) -> Result<()> {
-    let status = Command::new(program).args(arguments).status()?;
+    let status = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
     if !status.success() {
         bail!("{program} failed with {status}");
     }
@@ -844,6 +849,35 @@ fn run(program: &str, arguments: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installer_commands_cannot_pollute_json_output() {
+        const CHILD: &str = "SYN_TEST_INSTALLER_QUIET_CHILD";
+        const MARKER: &str = "syn-installer-child-output";
+        if std::env::var_os(CHILD).is_some() {
+            run(
+                "/bin/sh",
+                &["-c", &format!("printf {MARKER}; printf {MARKER} >&2")],
+            )
+            .unwrap();
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "installer::tests::installer_commands_cannot_pollute_json_output",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("running 1 test"));
+        assert!(stdout.contains("installer::tests::installer_commands_cannot_pollute_json_output"));
+        assert!(!stdout.contains(MARKER));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(MARKER));
+    }
 
     struct TestDirectory(PathBuf);
 
