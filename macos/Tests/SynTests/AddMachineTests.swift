@@ -151,6 +151,42 @@ private func waitForSetup(_ model: SynModel) async throws {
     #expect(cancellation.addMachineState == .idle)
 }
 
+@Test @MainActor func partiallyConfiguredRetryPreservesReservedTargetIdentity() async throws {
+    let settings = SSHConnectionSettings(hostname: "pi", username: "developer", port: nil)
+    let checker = SequencedSetupChecker([
+        .success(.init(settings: settings, serverAddress: "100.99.102.171", installation: .notInstalled)),
+        .success(.init(settings: settings, serverAddress: "100.99.102.171", installation: .updateRequired(nil))),
+        .success(.init(
+            settings: SSHConnectionSettings(hostname: "other", username: "developer", port: nil),
+            serverAddress: "100.99.102.172", installation: .notInstalled
+        )),
+    ])
+    let model = SynModel(startServices: false, setupChecker: checker)
+    model.addMachineHostname = settings.hostname
+    model.addMachineUsername = settings.username
+
+    model.checkMachineForSetup()
+    try await waitForSetup(model)
+    model.installCheckedMachine()
+    let reserved = try #require(model.setupTargetID)
+    #expect(reserved.hasPrefix("target_"))
+
+    // A failed activation may recover the remote configuration before the user
+    // checks the same machine again. Keep the request-bound identity locally.
+    model.checkMachineForSetup()
+    try await waitForSetup(model)
+    #expect(model.addMachineState == .updateRequired)
+    model.installCheckedMachine()
+    #expect(model.setupTargetID == reserved)
+
+    model.addMachineHostname = "other"
+    model.checkMachineForSetup()
+    try await waitForSetup(model)
+    #expect(model.setupTargetID == nil)
+    model.installCheckedMachine()
+    #expect(model.setupTargetID != reserved)
+}
+
 @Test @MainActor func savedTargetUpdateReusesSSHAndPreservesVisibleIdentity() async throws {
     let settings = SSHConnectionSettings(hostname: "pi.example", username: "developer", port: 2222)
     let checker = SetupCheckerFixture(.result(.init(

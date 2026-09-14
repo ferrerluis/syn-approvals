@@ -62,12 +62,14 @@ final class SynModel: ObservableObject {
     private var approvalCancellations: [String: ApprovalCancellation] = [:]
     private var setupTask: Task<Void, Never>?
     private var checkedSetup: RemoteMachinePreflight?
-    private var setupIdentity: (targetID: String, displayName: String)?
+    private var setupIdentity: (targetID: String, displayName: String, settings: SSHConnectionSettings)?
     private var pendingHostCandidate: SSHHostTrustCandidate?
     private var provisionalConnections: [String: TargetConnection] = [:]
     private var provisionalTargets: [String: TargetRecord] = [:]
     private var provisionalStreams: [String: AsyncThrowingStream<WireMessage, Error>.Continuation] = [:]
     private var verifiedProvisionalTargets: Set<String> = []
+
+    var setupTargetID: String? { setupIdentity?.targetID }
 
     init(
         startServices: Bool = true,
@@ -126,8 +128,7 @@ final class SynModel: ObservableObject {
     }
 
     func checkMachineForSetup() {
-        setupIdentity = nil
-        checkMachineForSetup(preserving: nil, settingsOverride: nil)
+        checkMachineForSetup(preserving: setupIdentity, settingsOverride: nil)
     }
 
     func updateMachine(_ target: TargetRecord) {
@@ -138,12 +139,12 @@ final class SynModel: ObservableObject {
         addMachineHostname = ssh.hostname
         addMachineUsername = ssh.username
         addMachinePort = ssh.port.map(String.init) ?? ""
-        setupIdentity = (target.targetID, target.displayName)
+        setupIdentity = (target.targetID, target.displayName, ssh)
         checkMachineForSetup(preserving: setupIdentity, settingsOverride: ssh)
     }
 
     private func checkMachineForSetup(
-        preserving identity: (targetID: String, displayName: String)?,
+        preserving identity: (targetID: String, displayName: String, settings: SSHConnectionSettings)?,
         settingsOverride: SSHConnectionSettings?
     ) {
         setupTask?.cancel()
@@ -167,6 +168,12 @@ final class SynModel: ObservableObject {
             addMachineState = .failed(error.localizedDescription)
             return
         }
+        let identity = identity.flatMap {
+            $0.settings.hostname == settings.hostname
+                && $0.settings.username == settings.username
+                && $0.settings.port == settings.port ? $0 : nil
+        }
+        setupIdentity = identity
         addMachineState = .checking
         let checker = setupChecker
         setupTask = Task { [weak self] in
@@ -181,9 +188,9 @@ final class SynModel: ObservableObject {
                 case let .updateRequired(status):
                     if identity == nil, let targetID = status?.targetID {
                         if let saved = self.targets.first(where: { $0.targetID == targetID }) {
-                            self.setupIdentity = (saved.targetID, saved.displayName)
+                            self.setupIdentity = (saved.targetID, saved.displayName, settings)
                         } else {
-                            self.setupIdentity = (targetID, settings.hostname)
+                            self.setupIdentity = (targetID, settings.hostname, settings)
                         }
                     }
                     self.addMachineState = .updateRequired
@@ -252,6 +259,7 @@ final class SynModel: ObservableObject {
         let targetID = setupIdentity?.targetID
             ?? "target_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
         let displayName = setupIdentity?.displayName ?? checkedSetup.settings.hostname
+        setupIdentity = (targetID, displayName, checkedSetup.settings)
         let listenIP = checkedSetup.serverAddress
         let requiresRecovery: Bool
         switch checkedSetup.installation {
