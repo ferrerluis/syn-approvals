@@ -775,6 +775,7 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
     func approvalPublicKey() throws -> Data { keys.publicIdentities.approval }
     func denialPublicKey() throws -> Data { keys.publicIdentities.denial }
     func accepts(_ candidate: VerifiedApprovalRequest) -> Bool { grant.matches(candidate) }
+    var isConsumed: Bool { lock.withLock { consumed } }
 
     func signApproval(payload: Data, reason: String, cancellation: ApprovalCancellation) throws -> (keyID: Data, signature: Data) {
         let publicKey = keys.publicIdentities.approval
@@ -859,8 +860,9 @@ final class E2EScenarioSigningProvider: DecisionSignerProviding, @unchecked Send
     func signer(for request: VerifiedApprovalRequest) throws -> any DecisionSigning {
         try lock.withLock {
             if let armed {
-                guard armed.accepts(request) else { throw E2ETestHarnessError.requestMismatch }
-                return armed
+                if armed.accepts(request) { return armed }
+                guard armed.isConsumed else { throw E2ETestHarnessError.requestMismatch }
+                self.armed = nil
             }
             let grant = try inbox.consumeGrant(for: request)
             let signer = try E2EScenarioSigner(grant: grant, request: request, keys: keys)

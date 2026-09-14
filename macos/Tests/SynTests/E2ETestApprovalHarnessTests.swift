@@ -267,6 +267,109 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
     }
 }
 
+@Test func providerRearmsForSequentialActivationCompletionAndSudoRequests() throws {
+    let profile = "org.syn-approvals.SynE2E.provider-sequence"
+    let requests = [
+        harnessRequest(nonceByte: 41),
+        harnessRequest(nonceByte: 42),
+        harnessRequest(nonceByte: 43),
+    ]
+    try withHarnessDirectory { root in
+        let keys = try E2EDisposableKeyStore(rootDirectory: root, profileID: profile)
+        let inbox = try E2EGrantInbox(directory: root, profileID: profile)
+        let provider = E2EScenarioSigningProvider(inbox: inbox, keys: keys)
+
+        for (index, request) in requests.enumerated() {
+            if index > 0 {
+                let oldRequest = requests[index - 1]
+                try writeGrant(E2ETestRequestGrant(
+                    profileID: profile, decision: .approve,
+                    expiresAt: Date().addingTimeInterval(30), request: oldRequest
+                ), to: inbox.grantURL)
+                #expect(throws: E2ETestHarnessError.requestMismatch) {
+                    _ = try provider.signer(for: request)
+                }
+            }
+            let grant = E2ETestRequestGrant(
+                profileID: profile, decision: .approve,
+                expiresAt: Date().addingTimeInterval(30), request: request
+            )
+            try writeGrant(grant, to: inbox.grantURL)
+            let signer = try provider.signer(for: request)
+            let input = try signatureInput(
+                request: request, approve: true, publicKey: signer.approvalPublicKey()
+            )
+            _ = try signer.signApproval(
+                payload: input, reason: "test", cancellation: ApprovalCancellation()
+            )
+            #expect(throws: E2ETestHarnessError.grantConsumed) {
+                _ = try signer.signApproval(
+                    payload: input, reason: "replay", cancellation: ApprovalCancellation()
+                )
+            }
+        }
+
+        let staleRequest = harnessRequest(nonceByte: 44)
+        let stale = E2ETestRequestGrant(
+            profileID: profile, decision: .approve,
+            expiresAt: Date().addingTimeInterval(-1), request: staleRequest
+        )
+        try writeGrant(stale, to: inbox.grantURL)
+        #expect(throws: E2ETestHarnessError.self) {
+            _ = try provider.signer(for: staleRequest)
+        }
+    }
+}
+
+@Test func consumedCancellationRearmsProviderAndConcurrentSigningRemainsOneUse() async throws {
+    let profile = "org.syn-approvals.SynE2E.provider-cancel-rearm"
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("syn-e2e-harness-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+    defer { try? FileManager.default.removeItem(at: root) }
+        let keys = try E2EDisposableKeyStore(rootDirectory: root, profileID: profile)
+        let inbox = try E2EGrantInbox(directory: root, profileID: profile)
+        let provider = E2EScenarioSigningProvider(inbox: inbox, keys: keys)
+        let canceledRequest = harnessRequest(nonceByte: 51)
+        try writeGrant(E2ETestRequestGrant(
+            profileID: profile, decision: .cancelAuthentication,
+            expiresAt: Date().addingTimeInterval(30), request: canceledRequest
+        ), to: inbox.grantURL)
+        let canceledSigner = try provider.signer(for: canceledRequest)
+        let canceledInput = try signatureInput(
+            request: canceledRequest, approve: true, publicKey: canceledSigner.approvalPublicKey()
+        )
+        #expect(throws: E2ETestHarnessError.simulatedCancellation) {
+            _ = try canceledSigner.signApproval(
+                payload: canceledInput, reason: "cancel", cancellation: ApprovalCancellation()
+            )
+        }
+
+        let nextRequest = harnessRequest(nonceByte: 52)
+        try writeGrant(E2ETestRequestGrant(
+            profileID: profile, decision: .approve,
+            expiresAt: Date().addingTimeInterval(30), request: nextRequest
+        ), to: inbox.grantURL)
+        let signer = try provider.signer(for: nextRequest)
+        let input = try signatureInput(
+            request: nextRequest, approve: true, publicKey: signer.approvalPublicKey()
+        )
+        let results = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    (try? signer.signApproval(
+                        payload: input, reason: "concurrent", cancellation: ApprovalCancellation()
+                    )) != nil
+                }
+            }
+            var values: [Bool] = []
+            for await value in group { values.append(value) }
+            return values
+        }
+        #expect(results.filter { $0 }.count == 1)
+}
+
 @Test func inboxPublishesObservedRequestAndAtomicallySpendsExactGrant() throws {
     let request = harnessRequest(nonceByte: 44)
     let profile = "org.syn-approvals.SynE2E.dynamic-inbox"
