@@ -3,6 +3,11 @@ import Foundation
 import Testing
 @testable import Syn
 
+@Test func remoteFailureDescriptionDoesNotClaimDiagnosticsWereDiscarded() {
+    #expect(RemoteOnboardingCoordinatorError.remoteFailed.localizedDescription ==
+            "The machine could not complete setup.")
+}
+
 private actor CoordinatorTransferFixture: SSHSourceTransferring {
     private(set) var calls = 0
     func transfer(

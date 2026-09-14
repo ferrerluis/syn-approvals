@@ -56,7 +56,7 @@ enum RemoteOnboardingCoordinatorError: Error, LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidResponse: "The machine returned an invalid setup response."
-        case .remoteFailed: "The machine could not complete setup. No remote diagnostics were retained."
+        case .remoteFailed: "The machine could not complete setup."
         case .recoveryRequired: "Setup entered its protected transition and automatic recovery could not be confirmed. Use the machine's recovery access before retrying."
         }
     }
