@@ -165,6 +165,7 @@ struct SSHConnectionSettings: Codable, Hashable, Sendable {
 /// Only connection routing and host verification survive ssh -G. Credential,
 /// forwarding, startup, and command settings cannot enter maintenance SSH.
 struct SSHMaintenanceRoute: Sendable {
+    let hostname: String
     let arguments: [String]
 
     static func parse(_ data: Data) throws -> Self {
@@ -188,9 +189,19 @@ struct SSHMaintenanceRoute: Sendable {
         guard let hostname = values["hostname"], let port = values["port"],
               let number = UInt16(port), number > 0 else { throw SSHProbeFailure.invalidOutput }
         try SSHConnectionSettings(hostname: hostname, username: "syn", port: number).validate()
-        return Self(arguments: values.keys.sorted().flatMap { name in
+        return Self(hostname: hostname, arguments: values.keys.sorted().flatMap { name in
             ["-o", "\(name)=\(values[name]!)"]
         })
+    }
+}
+
+protocol SSHMaintenanceRouteResolving: Sendable {
+    func resolve(_ settings: SSHConnectionSettings) async throws -> SSHMaintenanceRoute
+}
+
+struct SystemSSHMaintenanceRouteResolver: SSHMaintenanceRouteResolving {
+    func resolve(_ settings: SSHConnectionSettings) async throws -> SSHMaintenanceRoute {
+        try await settings.resolvedMaintenanceRoute()
     }
 }
 

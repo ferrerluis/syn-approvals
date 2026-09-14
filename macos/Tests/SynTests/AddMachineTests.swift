@@ -42,6 +42,13 @@ private actor HostScannerFixture: SSHHostKeyScanning {
     }
 }
 
+private struct RouteResolverFixture: SSHMaintenanceRouteResolving {
+    let hostname: String
+    func resolve(_ settings: SSHConnectionSettings) async throws -> SSHMaintenanceRoute {
+        SSHMaintenanceRoute(hostname: hostname, arguments: [])
+    }
+}
+
 @MainActor
 private func waitForSetup(_ model: SynModel) async throws {
     let deadline = ContinuousClock.now.advanced(by: .seconds(2))
@@ -103,13 +110,18 @@ private func waitForSetup(_ model: SynModel) async throws {
     #expect(installedModel.addMachineState == .installed(releaseID: "20260906160000", configuration: "configured"))
 }
 
-@Test func checkedMachineUsesVerifiedSSHPeerForTransportWithoutReplacingSSHHost() {
-    for sshHost in ["pi", "pi.example"] {
+@Test func checkedMachineUsesEffectiveSSHHostnameForTransportWithoutReplacingAlias() {
+    for (sshHost, effectiveHost) in [
+        ("pi", "ferrerluis97-everest.nord"),
+        ("pi.example", "pi.example"),
+    ] {
         let settings = SSHConnectionSettings(hostname: sshHost, username: "developer", port: 2222)
         let checked = RemoteMachinePreflight(
-            settings: settings, serverAddress: "100.99.102.171", installation: .notInstalled
+            settings: settings, serverAddress: "100.99.102.171",
+            transportHostname: effectiveHost, installation: .notInstalled
         )
-        #expect(checked.transportHostname == "100.99.102.171")
+        #expect(checked.transportHostname == effectiveHost)
+        #expect(checked.serverAddress == "100.99.102.171")
         #expect(checked.settings.hostname == sshHost)
     }
 }
@@ -292,7 +304,9 @@ private func provisionalRequest(targetID: String) -> VerifiedApprovalRequest {
         .init(status: 0, stdout: Data("192.168.2.20 50000 192.168.2.10 22\n".utf8)),
         .init(status: 127, stdout: Data()),
     ])
-    let result = try await SSHMachineSetupChecker(probe: .init(runner: replies)).check(settings)
+    let result = try await SSHMachineSetupChecker(
+        probe: .init(runner: replies), routeResolver: RouteResolverFixture(hostname: "pi")
+    ).check(settings)
     #expect(result.installation == .notInstalled)
 }
 
@@ -305,7 +319,9 @@ private func provisionalRequest(targetID: String) -> VerifiedApprovalRequest {
         .init(status: 0, stdout: Data("192.168.2.20 50000 192.168.2.10 22\n".utf8)),
         .init(status: 0, stdout: Data(legacy.utf8)),
     ])
-    let result = try await SSHMachineSetupChecker(probe: .init(runner: replies)).check(settings)
+    let result = try await SSHMachineSetupChecker(
+        probe: .init(runner: replies), routeResolver: RouteResolverFixture(hostname: "pi")
+    ).check(settings)
     #expect(result.installation == .updateRequired(nil))
 
     let malformed = ProbeFixtureForSetup([
@@ -315,7 +331,9 @@ private func provisionalRequest(targetID: String) -> VerifiedApprovalRequest {
         .init(status: 0, stdout: Data(legacy.dropLast().utf8)),
     ])
     await #expect(throws: SSHProbeFailure.invalidOutput) {
-        try await SSHMachineSetupChecker(probe: .init(runner: malformed)).check(settings)
+        try await SSHMachineSetupChecker(
+            probe: .init(runner: malformed), routeResolver: RouteResolverFixture(hostname: "pi")
+        ).check(settings)
     }
 }
 
@@ -334,9 +352,11 @@ private func provisionalRequest(targetID: String) -> VerifiedApprovalRequest {
         ])
     }
     let exact = try await SSHMachineSetupChecker(
-        probe: .init(runner: replies(status)), expectedRelease: release
+        probe: .init(runner: replies(status)), expectedRelease: release,
+        routeResolver: RouteResolverFixture(hostname: "ferrerluis97-everest.nord")
     ).check(settings)
     #expect(exact.serverAddress == "192.168.2.10")
+    #expect(exact.transportHostname == "ferrerluis97-everest.nord")
     guard case .installed = exact.installation else {
         Issue.record("exact configured release was not accepted")
         return
@@ -345,7 +365,8 @@ private func provisionalRequest(targetID: String) -> VerifiedApprovalRequest {
     let mismatch = status.replacingOccurrences(of: String(repeating: "a", count: 40),
                                                 with: String(repeating: "b", count: 40))
     let update = try await SSHMachineSetupChecker(
-        probe: .init(runner: replies(mismatch)), expectedRelease: release
+        probe: .init(runner: replies(mismatch)), expectedRelease: release,
+        routeResolver: RouteResolverFixture(hostname: "ferrerluis97-everest.nord")
     ).check(settings)
     guard case .updateRequired = update.installation else {
         Issue.record("release mismatch was not marked for update")
