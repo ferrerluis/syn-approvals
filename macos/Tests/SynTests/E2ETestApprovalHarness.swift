@@ -14,13 +14,6 @@ enum E2ETestHarnessError: Error, Equatable {
     case simulatedCancellation
 }
 
-enum E2ETransportIdentity {
-    static func labelPrefix(profileID: String) -> String {
-        let digest = SHA256.hash(data: Data(profileID.utf8))
-        return "E2" + digest.prefix(6).map { String(format: "%02x", $0) }.joined()
-    }
-}
-
 enum E2ETestDecision: String, Codable, Sendable {
     case approve
     case deny

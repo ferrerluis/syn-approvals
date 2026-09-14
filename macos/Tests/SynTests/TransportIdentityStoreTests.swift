@@ -180,19 +180,34 @@ private let clientAuthOID = Data([0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02
     #expect(TransportIdentityStore.valid(generated, label: label))
 }
 
-@Test func e2eProfilePrefixFitsFreshTargetInCertificateAndIsolatesProfiles() throws {
-    let firstProfile = "org.syn-approvals.SynE2E.case-e03-with-realistic-long-profile-identifier"
-    let secondProfile = firstProfile + "-other"
-    let firstPrefix = E2ETransportIdentity.labelPrefix(profileID: firstProfile)
-    let secondPrefix = E2ETransportIdentity.labelPrefix(profileID: secondProfile)
-    #expect(firstPrefix.utf8.count == 14)
-    #expect(firstPrefix != secondPrefix)
-
+@Test func e2eFreshTargetIdentityMatchesOnboardingRequestContract() throws {
     let freshTargetID = "target_" + String(repeating: "a", count: 32)
-    let label = try TransportIdentityStore.label(for: freshTargetID, prefix: firstPrefix)
-    #expect(label.utf8.count == 64)
+    let label = try TransportIdentityStore.label(for: freshTargetID)
     let generated = try MacTransportIdentityBackend.generatedMaterialForTesting(label: label)
     #expect(TransportIdentityStore.valid(generated, label: label))
+
+    let source = RemoteSourceArtifactDescriptor(
+        releaseID: "20260914203908", commit: String(repeating: "a", count: 40),
+        artifact: .init(
+            name: "source.tar.gz", sha256: String(repeating: "b", count: 64), sizeBytes: 1
+        )
+    )
+    let helper = RemoteHelperArtifactDescriptor(
+        releaseID: source.releaseID, commit: source.commit,
+        artifact: .init(
+            name: "synctl-arm64", sha256: String(repeating: "c", count: 64), sizeBytes: 1
+        )
+    )
+    let request = try RemoteOnboardingRequest.make(
+        settings: .init(hostname: "pi", username: "developer", port: nil),
+        resolvedHostname: "pi.local", listenIP: "192.168.1.2", displayName: "Pi",
+        targetID: freshTargetID,
+        approvalPublicKey: Data([4] + Array(repeating: 1, count: 64)),
+        denialPublicKey: Data([4] + Array(repeating: 2, count: 64)),
+        clientCertificatePEM: TransportIdentityStore.pem(for: generated.certificateDER),
+        source: source, helper: helper, randomBytes: { Data(repeating: 3, count: 16) }
+    )
+    #expect(label == request.clientIdentityLabel)
 }
 
 private func identityMaterial(
