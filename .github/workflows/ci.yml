@@ -115,6 +115,8 @@ jobs:
             --metadata "$release_dir/release.json" \
             --remote-helper "$release_dir/remote-helper.json" \
             --artifact "$helper"
+      - name: Exercise classic sudo in the automatic recovery service context
+        run: sudo ./scripts/test-recovery-service-context.sh "$RUNNER_TEMP/package-root/lib/systemd/system/syn-auto-recover.service"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: remote-release
