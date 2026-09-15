@@ -321,7 +321,7 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
     }
 }
 
-@Test func consumedCancellationRearmsProviderAndConcurrentSigningRemainsOneUse() async throws {
+@Test func cancellationRearmsProviderAfterDenialAndConcurrentSigningRemainsOneUse() async throws {
     let profile = "org.syn-approvals.SynE2E.provider-cancel-rearm"
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("syn-e2e-harness-\(UUID().uuidString)")
@@ -351,6 +351,14 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
             profileID: profile, decision: .approve,
             expiresAt: Date().addingTimeInterval(30), request: nextRequest
         ), to: inbox.grantURL)
+        #expect(throws: E2ETestHarnessError.requestMismatch) {
+            _ = try provider.signer(for: nextRequest)
+        }
+        #expect(FileManager.default.fileExists(atPath: inbox.grantURL.path))
+        let denialInput = try signatureInput(
+            request: canceledRequest, approve: false, publicKey: canceledSigner.denialPublicKey()
+        )
+        _ = try canceledSigner.signDenial(payload: denialInput)
         let signer = try provider.signer(for: nextRequest)
         let input = try signatureInput(
             request: nextRequest, approve: true, publicKey: signer.approvalPublicKey()
@@ -488,7 +496,7 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
 }
 
 
-@Test func cancellationConsumesGrantWithoutProducingSignature() throws {
+@Test func cancellationAllowsOneBoundDenialThenConsumesGrant() throws {
     let request = harnessRequest()
     let grant = E2ETestRequestGrant(
         profileID: "org.syn-approvals.SynE2E.case-e06", decision: .cancelAuthentication,
@@ -501,9 +509,160 @@ private func signatureInput(request: VerifiedApprovalRequest, approve: Bool, pub
         #expect(throws: E2ETestHarnessError.simulatedCancellation) {
             _ = try signer.signApproval(payload: payload, reason: "test", cancellation: ApprovalCancellation())
         }
+        let denialPayload = try signatureInput(
+            request: request, approve: false, publicKey: signer.denialPublicKey()
+        )
+        let denial = try signer.signDenial(payload: denialPayload)
+        let publicKey = try P256.Signing.PublicKey(x963Representation: signer.denialPublicKey())
+        #expect(publicKey.isValidSignature(
+            try P256.Signing.ECDSASignature(rawRepresentation: denial.signature), for: denialPayload
+        ))
         #expect(throws: E2ETestHarnessError.grantConsumed) {
             _ = try signer.signApproval(payload: payload, reason: "test", cancellation: ApprovalCancellation())
         }
+        #expect(throws: E2ETestHarnessError.grantConsumed) {
+            _ = try signer.signDenial(payload: denialPayload)
+        }
+    }
+}
+
+@Test func cancellationDenialRejectsMismatchedPayloadAndCannotRetry() throws {
+    let request = harnessRequest()
+    let grant = E2ETestRequestGrant(
+        profileID: "org.syn-approvals.SynE2E.case-e06-binding", decision: .cancelAuthentication,
+        expiresAt: Date().addingTimeInterval(30), request: request
+    )
+    try withHarnessDirectory { directory in
+        let keys = try E2EDisposableKeyStore(rootDirectory: directory, profileID: grant.profileID)
+        let signer = try E2EScenarioSigner(grant: grant, request: request, keys: keys)
+        let approvalPayload = try signatureInput(
+            request: request, approve: true, publicKey: signer.approvalPublicKey()
+        )
+        #expect(throws: E2ETestHarnessError.simulatedCancellation) {
+            _ = try signer.signApproval(
+                payload: approvalPayload, reason: "test", cancellation: ApprovalCancellation()
+            )
+        }
+        let wrongDenial = try signatureInput(
+            request: harnessRequest(target: "wrong-target"), approve: false,
+            publicKey: signer.denialPublicKey()
+        )
+        #expect(throws: E2ETestHarnessError.requestMismatch) {
+            _ = try signer.signDenial(payload: wrongDenial)
+        }
+        let exactDenial = try signatureInput(
+            request: request, approve: false, publicKey: signer.denialPublicKey()
+        )
+        #expect(throws: E2ETestHarnessError.grantConsumed) {
+            _ = try signer.signDenial(payload: exactDenial)
+        }
+    }
+}
+
+@Test func concurrentCancellationDenialsProduceOnlyOneSignature() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("syn-e2e-harness-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let request = harnessRequest()
+    let grant = E2ETestRequestGrant(
+        profileID: "org.syn-approvals.SynE2E.case-e06-concurrent", decision: .cancelAuthentication,
+        expiresAt: Date().addingTimeInterval(30), request: request
+    )
+    let keys = try E2EDisposableKeyStore(rootDirectory: root, profileID: grant.profileID)
+    let signer = try E2EScenarioSigner(grant: grant, request: request, keys: keys)
+    let approvalPayload = try signatureInput(
+        request: request, approve: true, publicKey: signer.approvalPublicKey()
+    )
+    #expect(throws: E2ETestHarnessError.simulatedCancellation) {
+        _ = try signer.signApproval(
+            payload: approvalPayload, reason: "test", cancellation: ApprovalCancellation()
+        )
+    }
+    let denialPayload = try signatureInput(
+        request: request, approve: false, publicKey: signer.denialPublicKey()
+    )
+    let outcomes = await withTaskGroup(of: Int.self, returning: [Int].self) { group in
+        for _ in 0..<16 {
+            group.addTask {
+                do {
+                    _ = try signer.signDenial(payload: denialPayload)
+                    return 0
+                } catch E2ETestHarnessError.grantConsumed {
+                    return 1
+                } catch {
+                    return 2
+                }
+            }
+        }
+        var values: [Int] = []
+        for await value in group { values.append(value) }
+        return values
+    }
+    #expect(outcomes.filter { $0 == 0 }.count == 1)
+    #expect(outcomes.filter { $0 == 1 }.count == 15)
+    #expect(!outcomes.contains(2))
+}
+
+@Test @MainActor func cancellationGrantDrivesProductionModelToOneSignedDenial() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("syn-e2e-harness-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let request = harnessRequest()
+    let grant = E2ETestRequestGrant(
+        profileID: "org.syn-approvals.SynE2E.case-e06-model", decision: .cancelAuthentication,
+        expiresAt: Date().addingTimeInterval(30), request: request
+    )
+    let keys = try E2EDisposableKeyStore(rootDirectory: root, profileID: grant.profileID)
+    let inbox = try E2EGrantInbox(directory: root, profileID: grant.profileID)
+    try writeGrant(grant, to: inbox.grantURL)
+    let provider = E2EScenarioSigningProvider(inbox: inbox, keys: keys)
+    var messages: [WireMessage] = []
+    let model = SynModel(startServices: false, signingProvider: provider) { message, target in
+        #expect(target == request.targetID)
+        messages.append(message)
+    }
+    try model.enqueueVerified(request)
+
+    await model.approve(request.id)
+    await model.approve(request.id)
+
+    let message = try #require(messages.first)
+    #expect(messages.count == 1)
+    #expect(message.kind == .decision)
+    guard case let .tag(18, inner) = try CBORCodec.decodeCanonical(message.body),
+          let cose = inner.arrayValue, cose.count == 4,
+          let protected = cose[0].bytesValue, let decisionPayload = cose[2].bytesValue,
+          let signature = cose[3].bytesValue else {
+        throw E2ETestHarnessError.requestMismatch
+    }
+    let denialPublicKey = try P256.Signing.PublicKey(x963Representation: keys.publicIdentities.denial)
+    let signedInput = try SynProtocol.signatureStructure(
+        protected: protected, payload: decisionPayload
+    )
+    #expect(denialPublicKey.isValidSignature(
+        try P256.Signing.ECDSASignature(rawRepresentation: signature),
+        for: signedInput
+    ))
+    let decision = try CBORCodec.decodeCanonical(decisionPayload).integerKeyedMap()
+    #expect(decision[1]?.bytesValue == request.requestID)
+    #expect(decision[2]?.bytesValue == request.payloadHash)
+    #expect(decision[3]?.textValue == request.targetID)
+    #expect(decision[4]?.unsignedValue == 2)
+    #expect(model.pending.isEmpty)
+    #expect(model.authenticatingRequests.isEmpty)
+
+    let signer = try provider.signer(for: request)
+    let replay = try signatureInput(
+        request: request, approve: false, publicKey: signer.denialPublicKey()
+    )
+    #expect(throws: E2ETestHarnessError.grantConsumed) {
+        _ = try signer.signDenial(payload: replay)
     }
 }
 

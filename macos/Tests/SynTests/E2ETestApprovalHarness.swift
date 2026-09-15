@@ -748,13 +748,19 @@ final class E2EDisposableKeyStore: @unchecked Sendable {
 }
 
 final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
+    private enum GrantState {
+        case unused
+        case authenticationCanceled
+        case consumed
+    }
+
     private let grant: E2ETestRequestGrant
     private let request: VerifiedApprovalRequest
     private let keys: E2EDisposableKeyStore
     private let effectiveExpiry: Date
     private let currentDate: @Sendable () -> Date
     private let lock = NSLock()
-    private var consumed = false
+    private var state = GrantState.unused
 
     init(
         grant: E2ETestRequestGrant, request: VerifiedApprovalRequest,
@@ -775,7 +781,7 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
     func approvalPublicKey() throws -> Data { keys.publicIdentities.approval }
     func denialPublicKey() throws -> Data { keys.publicIdentities.denial }
     func accepts(_ candidate: VerifiedApprovalRequest) -> Bool { grant.matches(candidate) }
-    var isConsumed: Bool { lock.withLock { consumed } }
+    var isTerminal: Bool { lock.withLock { state == .consumed } }
 
     func signApproval(payload: Data, reason: String, cancellation: ApprovalCancellation) throws -> (keyID: Data, signature: Data) {
         let publicKey = keys.publicIdentities.approval
@@ -793,16 +799,26 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
 
     private func consume(expected: E2ETestDecision, payload: Data, publicKey: Data) throws {
         try lock.withLock {
-            guard !consumed else { throw E2ETestHarnessError.grantConsumed }
-            consumed = true
+            let resumesCanceledAuthentication = state == .authenticationCanceled
+                && expected == .deny && grant.decision == .cancelAuthentication
+            guard state == .unused || resumesCanceledAuthentication else {
+                throw E2ETestHarnessError.grantConsumed
+            }
+            // Consume before validating so malformed, expired, mismatched, or
+            // competing attempts cannot retry. Only an exact simulated
+            // authentication cancellation opens the one denial transition.
+            state = .consumed
             guard effectiveExpiry > currentDate() else {
                 throw E2ETestHarnessError.invalidConfiguration("grant expired")
             }
-            guard grant.decision == expected || (expected == .approve && grant.decision == .cancelAuthentication) else {
+            let beginsCanceledAuthentication = expected == .approve
+                && grant.decision == .cancelAuthentication
+            guard grant.decision == expected || beginsCanceledAuthentication || resumesCanceledAuthentication else {
                 throw E2ETestHarnessError.requestMismatch
             }
             let keyID = Data(SHA256.hash(data: publicKey))
             try validateSignatureInput(payload, approve: expected == .approve, keyID: keyID)
+            if beginsCanceledAuthentication { state = .authenticationCanceled }
         }
     }
 
@@ -861,7 +877,7 @@ final class E2EScenarioSigningProvider: DecisionSignerProviding, @unchecked Send
         try lock.withLock {
             if let armed {
                 if armed.accepts(request) { return armed }
-                guard armed.isConsumed else { throw E2ETestHarnessError.requestMismatch }
+                guard armed.isTerminal else { throw E2ETestHarnessError.requestMismatch }
                 self.armed = nil
             }
             let grant = try inbox.consumeGrant(for: request)
