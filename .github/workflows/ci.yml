@@ -36,7 +36,7 @@ jobs:
             --release-id "$release_id" \
             --commit "$(git rev-parse HEAD)" \
             --output "$RUNNER_TEMP/release/release.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-metadata
           path: ${{ runner.temp }}/release/release.json
@@ -117,7 +117,7 @@ jobs:
             --artifact "$helper"
       - name: Exercise classic sudo in the automatic recovery service context
         run: sudo ./scripts/test-recovery-service-context.sh "$RUNNER_TEMP/package-root/lib/systemd/system/syn-auto-recover.service"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: remote-release
           path: ${{ runner.temp }}/release
@@ -162,7 +162,7 @@ jobs:
             "$release_dir/syn-remote-source-${release_id}.tar.gz" \
             "$release_dir/synctl-arm64-${release_id}" \
             "$release_dir"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mac-release
           path: ${{ runner.temp }}/release/Syn-macOS-*.zip
