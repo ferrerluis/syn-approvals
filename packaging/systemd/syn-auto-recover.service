@@ -14,6 +14,9 @@ RestartSec=2s
 UMask=0077
 PrivateTmp=yes
 ProtectHome=yes
-NoNewPrivileges=yes
+# Recovery must execute and validate the restored setuid sudo.ws provider.
+# Ubuntu denies sudo.ws access to /etc/sudoers when it is launched with
+# no_new_privs, even by this already-root, fixed-path recovery helper.
+NoNewPrivileges=no
 LockPersonality=yes
 TimeoutStartSec=2min

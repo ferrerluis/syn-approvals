@@ -771,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_service_has_no_state_condition_and_retries_boundedly() {
+    fn recovery_service_retries_boundedly_and_allows_sudo_validation() {
         let service = String::from_utf8(EXPECTED_RECOVERY_SERVICE.to_vec()).unwrap();
         assert!(!service.contains("ConditionPathExists="));
         assert!(service.contains(
@@ -781,6 +781,8 @@ mod tests {
         assert!(service.contains("RestartSec=2s\n"));
         assert!(service.contains("StartLimitIntervalSec=30s\n"));
         assert!(service.contains("StartLimitBurst=5\n"));
+        assert!(service.contains("NoNewPrivileges=no\n"));
+        assert!(!service.contains("NoNewPrivileges=yes\n"));
     }
 
     #[test]
