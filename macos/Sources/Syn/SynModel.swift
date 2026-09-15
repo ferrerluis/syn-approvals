@@ -725,10 +725,29 @@ final class SynModel: ObservableObject {
 
     private func send(_ message: WireMessage, to targetID: String) async throws {
         if let decisionSender { try await decisionSender(message, targetID); return }
-        guard let connection = connections[targetID] ?? provisionalConnections[targetID] else {
-            throw URLError(.notConnectedToInternet)
-        }
+        let connection = try Self.connectionForSend(
+            saved: connections[targetID],
+            provisional: provisionalConnections[targetID],
+            hasProvisionalTarget: provisionalTargets[targetID] != nil,
+            provisionalIsVerified: verifiedProvisionalTargets.contains(targetID)
+        )
         try await connection.send(message)
+    }
+
+    nonisolated static func connectionForSend<Connection>(
+        saved: Connection?,
+        provisional: Connection?,
+        hasProvisionalTarget: Bool,
+        provisionalIsVerified: Bool
+    ) throws -> Connection {
+        if hasProvisionalTarget {
+            guard provisionalIsVerified, let provisional else {
+                throw URLError(.notConnectedToInternet)
+            }
+            return provisional
+        }
+        guard let saved else { throw URLError(.notConnectedToInternet) }
+        return saved
     }
 
     private func scheduleReconnect(_ target: TargetRecord) {
