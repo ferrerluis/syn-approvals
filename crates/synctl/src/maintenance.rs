@@ -1058,6 +1058,36 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_copy_rejects_substituted_helper_with_trusted_hash() {
+        let root = std::env::temp_dir().join(format!(
+            "syn-bootstrap-hash-test-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let source = root.join("synctl-bootstrap.incoming");
+        let destination = root.join("synctl-bootstrap");
+        let trusted = b"trusted bootstrap helper";
+        let substituted = vec![b'x'; trusted.len()];
+        fs::write(&source, &substituted).unwrap();
+
+        let error = copy_and_hash(
+            File::open(&source).unwrap(),
+            &destination,
+            trusted.len() as u64,
+            &hex::encode(Sha256::digest(trusted)),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        let _ = fs::remove_dir_all(root);
+        assert_eq!(
+            message,
+            "incoming helper does not match trusted hash and size"
+        );
+    }
+
+    #[test]
     fn empty_authorized_keys_install_revoke_reinstall_lifecycle() {
         let entry = "restrict ssh-ed25519 test syn-maintenance-v1";
         let installed = authorized_entry_append("", entry).unwrap().unwrap();
