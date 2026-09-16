@@ -83,14 +83,17 @@ final class StartupPreference {
 
     func choose(_ enabled: Bool) throws {
         // Record consent only after the OS confirms the requested state.
+        let status = service.status
+        guard status != .unknown else {
+            throw SynProtocolError.invalid("macOS returned an unknown login item status.")
+        }
         if enabled {
-            if !service.status.isEnabled { try service.setEnabled(true) }
+            if !status.isEnabled { try service.setEnabled(true) }
         } else {
-            switch service.status.registrationExists {
+            switch status.registrationExists {
             case true: try service.setEnabled(false)
             case false: break
-            case nil:
-                throw SynProtocolError.invalid("macOS returned an unknown login item status.")
+            case nil: throw SynProtocolError.invalid("macOS returned an unknown login item status.")
             }
         }
         defaults.set(enabled ? "yes" : "no", forKey: Self.choiceKey)

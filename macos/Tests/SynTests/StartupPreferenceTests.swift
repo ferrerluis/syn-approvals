@@ -94,6 +94,37 @@ private final class SilentNotifications: SynNotifying, @unchecked Sendable {
     #expect(defaults.string(forKey: "syn.startupChoice.v1") == "no")
 }
 
+@Test @MainActor func unknownLoginItemStatusRejectsBothChoicesWithoutSideEffects() throws {
+    for choice in [true, false] {
+        let suite = "org.syn-approvals.tests.startup.unknown.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = FakeLoginItem()
+        service.status = .unknown
+        let settings = StartupPreference(defaults: defaults, service: service)
+
+        #expect(throws: SynProtocolError.self) { try settings.choose(choice) }
+        #expect(service.calls == 0)
+        #expect(service.status == .unknown)
+        #expect(defaults.string(forKey: "syn.startupChoice.v1") == nil)
+    }
+}
+
+@Test @MainActor func failedApprovalPendingUnregisterDoesNotRecordNo() throws {
+    let suite = "org.syn-approvals.tests.startup.pending-failure.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let service = FakeLoginItem()
+    service.status = .requiresApproval
+    service.reject = true
+    let settings = StartupPreference(defaults: defaults, service: service)
+
+    #expect(throws: SynProtocolError.self) { try settings.choose(false) }
+    #expect(service.calls == 1)
+    #expect(service.status == .requiresApproval)
+    #expect(defaults.string(forKey: "syn.startupChoice.v1") == nil)
+}
+
 @Test @MainActor func systemLoginItemPreservesMacOSRegistrationStatuses() {
     #expect(SystemLoginItem.registrationStatus(for: .notRegistered) == .notRegistered)
     #expect(SystemLoginItem.registrationStatus(for: .enabled) == .enabled)
