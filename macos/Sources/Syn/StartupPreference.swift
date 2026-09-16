@@ -1,9 +1,27 @@
 import Foundation
 import ServiceManagement
 
+enum LoginItemRegistrationStatus: Equatable {
+    case notRegistered
+    case enabled
+    case requiresApproval
+    case notFound
+    case unknown
+
+    var isEnabled: Bool { self == .enabled }
+
+    var registrationExists: Bool? {
+        switch self {
+        case .enabled, .requiresApproval: true
+        case .notRegistered, .notFound: false
+        case .unknown: nil
+        }
+    }
+}
+
 @MainActor
 protocol LoginItemManaging {
-    var enabled: Bool { get }
+    var status: LoginItemRegistrationStatus { get }
     func setEnabled(_ enabled: Bool) throws
 }
 
@@ -17,13 +35,31 @@ extension UserDefaults: StartupPreferenceStoring {}
 
 @MainActor
 struct SystemLoginItem: LoginItemManaging {
-    var enabled: Bool { SMAppService.mainApp.status == .enabled }
+    var status: LoginItemRegistrationStatus {
+        Self.registrationStatus(for: SMAppService.mainApp.status)
+    }
+
+    static func registrationStatus(for status: SMAppService.Status) -> LoginItemRegistrationStatus {
+        switch status {
+        case .notRegistered: .notRegistered
+        case .enabled: .enabled
+        case .requiresApproval: .requiresApproval
+        case .notFound: .notFound
+        @unknown default: .unknown
+        }
+    }
 
     func setEnabled(_ enabled: Bool) throws {
         if enabled { try SMAppService.mainApp.register() }
         else { try SMAppService.mainApp.unregister() }
-        guard self.enabled == enabled else {
-            throw SynProtocolError.invalid("macOS has not enabled this login item. Check Login Items in System Settings.")
+        if enabled {
+            guard status == .enabled else {
+                throw SynProtocolError.invalid("macOS has not enabled this login item. Check Login Items in System Settings.")
+            }
+        } else {
+            guard status.registrationExists == false else {
+                throw SynProtocolError.invalid("macOS has not disabled this login item. Check Login Items in System Settings.")
+            }
         }
     }
 }
@@ -39,15 +75,24 @@ final class StartupPreference {
         self.service = service
     }
 
-    var enabled: Bool { service.enabled }
+    var enabled: Bool { service.status.isEnabled }
 
     func shouldAsk(existingTargets: Bool) -> Bool {
-        defaults.string(forKey: Self.choiceKey) == nil && !existingTargets && !service.enabled
+        defaults.string(forKey: Self.choiceKey) == nil && !existingTargets && !service.status.isEnabled
     }
 
     func choose(_ enabled: Bool) throws {
         // Record consent only after the OS confirms the requested state.
-        if service.enabled != enabled { try service.setEnabled(enabled) }
+        if enabled {
+            if !service.status.isEnabled { try service.setEnabled(true) }
+        } else {
+            switch service.status.registrationExists {
+            case true: try service.setEnabled(false)
+            case false: break
+            case nil:
+                throw SynProtocolError.invalid("macOS returned an unknown login item status.")
+            }
+        }
         defaults.set(enabled ? "yes" : "no", forKey: Self.choiceKey)
     }
 
