@@ -13,6 +13,40 @@ import Testing
     }
 }
 
+private final class SilentNotifications: SynNotifying, @unchecked Sendable {
+    var onReview: (@Sendable (String) -> Void)?
+    var onDeny: (@Sendable (String) -> Void)?
+
+    func configure() async throws {}
+    func post(request: VerifiedApprovalRequest, targetName: String) async throws {}
+    func remove(requestID: String) {}
+}
+
+@Test @MainActor func shippingModelWiresItsDefaultStartupPreference() throws {
+    let defaults = UserDefaults.standard
+    let choiceKey = "syn.startupChoice.v1"
+    let previousChoice = defaults.object(forKey: choiceKey)
+    defer {
+        if let previousChoice { defaults.set(previousChoice, forKey: choiceKey) }
+        else { defaults.removeObject(forKey: choiceKey) }
+    }
+    defaults.removeObject(forKey: choiceKey)
+
+    // The SwiftPM test executable is not a registered login item, matching a
+    // clean installation without touching the user's real Syn registration.
+    #expect(!SystemLoginItem().enabled)
+    let targetFile = FileManager.default.temporaryDirectory
+        .appendingPathComponent("syn-startup-targets-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: targetFile) }
+
+    let model = SynModel(
+        targetStore: try TargetStore(fileURL: targetFile),
+        notifications: SilentNotifications()
+    )
+
+    #expect(model.showStartupPrompt)
+}
+
 @Test @MainActor func startupChoicesPersistWithoutSystemChangesInTests() throws {
     for choice in ["yes", "no", "dismissed"] {
         let suite = "org.syn-approvals.tests.startup.\(UUID().uuidString)"
