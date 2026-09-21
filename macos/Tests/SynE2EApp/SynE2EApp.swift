@@ -11,8 +11,8 @@ private final class E2ENotifications: SynNotifying, @unchecked Sendable {
 
 @MainActor
 private final class E2ELoginItem: LoginItemManaging {
-    var enabled = false
-    func setEnabled(_ enabled: Bool) throws { self.enabled = enabled }
+    var status: LoginItemRegistrationStatus = .notRegistered
+    func setEnabled(_ enabled: Bool) throws { status = enabled ? .enabled : .notRegistered }
 }
 
 @MainActor

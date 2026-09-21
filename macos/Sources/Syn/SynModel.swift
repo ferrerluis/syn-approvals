@@ -111,7 +111,7 @@ final class SynModel: ObservableObject {
         } else {
             lastError = "Syn cannot open its Application Support directory."
         }
-        showStartupPrompt = startupPreference?.shouldAsk(existingTargets: !targets.isEmpty) == true
+        showStartupPrompt = self.startupPreference?.shouldAsk(existingTargets: !targets.isEmpty) == true
         notifications.onReview = { [weak self] requestID in
             Task { @MainActor in self?.review(requestID) }
         }
