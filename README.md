@@ -7,7 +7,7 @@ Syn lets a Mac approve one privileged action on a remote machine at a time. Down
 The remote machine must already be reachable by that hostname, accept SSH for the selected account, and allow that account to use `sudo`. Setup uses SSH only to inspect, transfer, build, install, pair, update, recover, or uninstall Syn; everyday approval requests use a direct mutually authenticated TLS connection to the saved hostname, with no SSH tunnel, VPN-provider integration, or Syn cloud relay.
 
 > [!WARNING]
-> The Mac-led flow is a security-sensitive candidate backed by automated component tests, not a completed release. Its [12-case live acceptance suite](docs/onboarding-e2e-test-plan.md) has not passed, and Syn has not received an independent security review.
+> The Mac-led flow is a security-sensitive experimental release. Its [12-case hybrid acceptance suite](docs/onboarding-e2e-test-plan.md) passed with the [documented live/component boundaries](docs/validation/2026-09-14-onboarding-e2e-results.md), but Syn has not received an independent security review.
 
 ## Install the experimental Mac build
 
