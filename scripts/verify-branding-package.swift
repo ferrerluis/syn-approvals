@@ -21,7 +21,10 @@ enum BrandingPackageProbe {
     }
     let resources = app.appendingPathComponent("Contents/Resources")
     let bundleURL = resources.appendingPathComponent("Syn_Syn.bundle")
-    let expected = Set(["syn-app-icon-light.png", "syn-app-icon-dark.png", "syn-menu-icon.svg"])
+    let expected = Set([
+      "syn-app-icon-light.png", "syn-app-icon-dark.png", "syn-menu-icon-idle.png",
+      "syn-menu-icon.svg",
+    ])
     if CommandLine.arguments.dropFirst() == ["--expect-missing"] {
       for name in expected {
         let path = name as NSString
@@ -32,7 +35,7 @@ enum BrandingPackageProbe {
         }
       }
       guard SynBranding.lightLogo.isValid, SynBranding.darkLogo.isValid,
-        SynBranding.menuBarLogo.isValid,
+        SynBranding.idleMenuLogo.isValid, SynBranding.pendingMenuLogo.isValid,
         SynBranding.idleMenuIcon.isTemplate, SynBranding.pendingMenuIcon.isTemplate
       else {
         fail("Missing artwork did not safely fall back")
@@ -72,6 +75,6 @@ enum BrandingPackageProbe {
     guard Set([16, 32, 128, 256]).isSubset(of: sizes) else {
       fail("Packaged compatibility icon is missing native pixel sizes")
     }
-    print("Branding package verified: three artwork resources and compiled Icon Composer assets.")
+    print("Branding package verified: four artwork resources and compiled Icon Composer assets.")
   }
 }

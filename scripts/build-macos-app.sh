@@ -118,6 +118,7 @@ resource_dir="$app_dir/Contents/Resources/Syn_Syn.bundle"
 install -d "$resource_dir"
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-app-icon-light.png" "$resource_dir/"
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-app-icon-dark.png" "$resource_dir/"
+install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-menu-icon-idle.png" "$resource_dir/"
 install -m 0644 "$build_dir/release/Syn_Syn.bundle/syn-menu-icon.svg" "$resource_dir/"
 
 # Let Xcode compile the supplied Icon Composer source. Assets.car retains the

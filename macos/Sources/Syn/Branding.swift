@@ -5,9 +5,10 @@ import SwiftUI
 @MainActor enum SynBranding {
   static let lightLogo = load("syn-app-icon-light", extension: "png")
   static let darkLogo = load("syn-app-icon-dark", extension: "png")
-  static let menuBarLogo = load("syn-menu-icon", extension: "svg")
-  static let idleMenuIcon = makeMenuIcon(hasPending: false)
-  static let pendingMenuIcon = makeMenuIcon(hasPending: true)
+  static let idleMenuLogo = load("syn-menu-icon-idle", extension: "png")
+  static let pendingMenuLogo = load("syn-menu-icon", extension: "svg")
+  static let idleMenuIcon = makeIdleMenuIcon()
+  static let pendingMenuIcon = makePendingMenuIcon()
 
   static func logo(for colorScheme: ColorScheme) -> NSImage {
     colorScheme == .dark ? darkLogo : lightLogo
@@ -40,23 +41,52 @@ import SwiftUI
     return image
   }
 
-  private static func makeMenuIcon(hasPending: Bool) -> NSImage {
-    let logo = menuBarLogo
-    let image = NSImage(size: NSSize(width: hasPending ? 24 : 18, height: 18), flipped: false) {
-      _ in
-      let scale = min(18 / logo.size.width, 18 / logo.size.height)
-      let size = NSSize(width: logo.size.width * scale, height: logo.size.height * scale)
-      let origin = NSPoint(x: (18 - size.width) / 2, y: (18 - size.height) / 2)
-      logo.draw(in: NSRect(origin: origin, size: size))
-      if hasPending {
-        NSColor.black.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 20, y: 1, width: 3, height: 3)).fill()
-      }
+  private static func makeIdleMenuIcon() -> NSImage {
+    let canvas = CGFloat(18)
+    let pendingScale = min(
+      canvas / pendingMenuLogo.size.width,
+      canvas / pendingMenuLogo.size.height
+    )
+    let pendingWidth = pendingMenuLogo.size.width * pendingScale
+    let size = NSSize(
+      width: idleMenuLogo.size.width * pendingScale,
+      height: idleMenuLogo.size.height * pendingScale
+    )
+    let origin = NSPoint(x: (canvas - pendingWidth) / 2, y: 0)
+    return templateMenuIcon(
+      drawing: idleMenuLogo,
+      in: NSRect(origin: origin, size: size),
+      accessibilityDescription: "Syn"
+    )
+  }
+
+  private static func makePendingMenuIcon() -> NSImage {
+    let canvas = CGFloat(18)
+    let scale = min(canvas / pendingMenuLogo.size.width, canvas / pendingMenuLogo.size.height)
+    let size = NSSize(
+      width: pendingMenuLogo.size.width * scale,
+      height: pendingMenuLogo.size.height * scale
+    )
+    let origin = NSPoint(x: (canvas - size.width) / 2, y: (canvas - size.height) / 2)
+    return templateMenuIcon(
+      drawing: pendingMenuLogo,
+      in: NSRect(origin: origin, size: size),
+      accessibilityDescription: "Syn, approval pending"
+    )
+  }
+
+  private static func templateMenuIcon(
+    drawing logo: NSImage,
+    in rect: NSRect,
+    accessibilityDescription: String
+  ) -> NSImage {
+    let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+      logo.draw(in: rect)
       return true
     }
     // AppKit supplies light/dark/highlight contrast from this black mask.
     image.isTemplate = true
-    image.accessibilityDescription = hasPending ? "Syn, approval pending" : "Syn"
+    image.accessibilityDescription = accessibilityDescription
     return image
   }
 }

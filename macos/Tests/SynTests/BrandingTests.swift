@@ -11,6 +11,7 @@ import Testing
   let resources = [
     ("syn-app-icon-light", "light", "png", true),
     ("syn-app-icon-dark", "dark", "png", true),
+    ("syn-menu-icon-idle", "menu-bar", "png", false),
     ("syn-menu-icon", "menu-bar", "svg", false),
   ]
   for (name, directory, fileExtension, expectSquare) in resources {
@@ -29,14 +30,17 @@ import Testing
   #expect(SynBranding.idleMenuIcon.isTemplate)
   #expect(SynBranding.pendingMenuIcon.isTemplate)
   #expect(SynBranding.idleMenuIcon.size == NSSize(width: 18, height: 18))
-  #expect(SynBranding.pendingMenuIcon.size == NSSize(width: 24, height: 18))
+  #expect(SynBranding.pendingMenuIcon.size == NSSize(width: 18, height: 18))
   #expect(SynBranding.pendingMenuIcon.accessibilityDescription?.contains("pending") == true)
-  #expect(SynBranding.menuBarLogo.size.width != SynBranding.menuBarLogo.size.height)
+  #expect(SynBranding.idleMenuIcon.tiffRepresentation != SynBranding.pendingMenuIcon.tiffRepresentation)
+  #expect(SynBranding.idleMenuLogo.size.width != SynBranding.idleMenuLogo.size.height)
+  #expect(SynBranding.pendingMenuLogo.size.width != SynBranding.pendingMenuLogo.size.height)
 }
 
 @MainActor @Test func logosRenderWithTransparencyAndColor() throws {
   for (image, expectColor) in [
-    (SynBranding.lightLogo, true), (SynBranding.darkLogo, true), (SynBranding.menuBarLogo, false),
+    (SynBranding.lightLogo, true), (SynBranding.darkLogo, true),
+    (SynBranding.idleMenuLogo, false), (SynBranding.pendingMenuLogo, false),
   ] {
     let renderer = ImageRenderer(
       content: Image(nsImage: image).resizable().scaledToFit().frame(width: 64, height: 64)
