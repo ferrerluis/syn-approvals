@@ -125,7 +125,8 @@ jobs:
 
   macos:
     needs: [ubuntu-arm-release]
-    runs-on: macos-15
+    # Icon Composer's asset runtime requires the matching macOS 26 host.
+    runs-on: macos-26
     env:
       # The runner's default Xcode 16.4 has Swift 6.1; Syn requires Swift 6.2.
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer

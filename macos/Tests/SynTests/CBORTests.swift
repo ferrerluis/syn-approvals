@@ -52,7 +52,7 @@ private struct LegacyGoldenFixture: Decodable {
 }
 
 @Test func unsafeUnicodeIsEscaped() {
-    #expect(SafeDisplay.render(Data("safe\u{202e}unsafe".utf8)) == "safe\\u{202E}unsafe")
+    #expect(SafeDisplay.render(Data("safe\u{202e}unsafe".utf8)) == "\"safe\\u{202E}unsafe\"")
 }
 
 @Test func invalidUTF8IsHexadecimal() {
@@ -97,8 +97,8 @@ private struct LegacyGoldenFixture: Decodable {
     let target = try goldenTarget(fixture)
     let request = try SynProtocol.verifyRequest(Data(hex: fixture.signedRequestHex), target: target)
     #expect(request.payloadHash.hex == fixture.requestPayloadHashHex)
-    #expect(SafeDisplay.render(request.executable) == "/usr/bin/apt")
-    #expect(request.arguments.map(SafeDisplay.render) == ["apt", "install", "gh"])
+    #expect(SafeDisplay.render(request.executable) == "\"/usr/bin/apt\"")
+    #expect(request.arguments.map(SafeDisplay.render) == ["\"apt\"", "\"install\"", "\"gh\""])
     #expect(request.expiresAt.timeIntervalSince(request.issuedAt) == 90)
     #expect(request.releaseID == ReleaseIdentity.current.releaseID)
     #expect(request.releaseCommit == SynProtocol.developmentCommit)
@@ -109,7 +109,7 @@ private struct LegacyGoldenFixture: Decodable {
     }
     for signed in [fixture.signedNoTTYRequestHex, fixture.signedNoTTYNoninteractiveRequestHex] {
         let request = try SynProtocol.verifyRequest(Data(hex: signed), target: target)
-        #expect(request.arguments.map(SafeDisplay.render) == ["apt", "install", "gh"])
+        #expect(request.arguments.map(SafeDisplay.render) == ["\"apt\"", "\"install\"", "\"gh\""])
     }
     #expect(throws: SynProtocolError.self) {
         _ = try SynProtocol.verifyRequest(Data(hex: fixture.legacy30SecondRequestHex), target: target)

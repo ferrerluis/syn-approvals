@@ -10,15 +10,23 @@ enum SafeDisplay {
         guard let text = String(data: data, encoding: .utf8), Data(text.utf8) == data else {
             return "hex:" + data.hex
         }
-        var output = ""
+        // Quoting distinguishes text from the raw-byte fallback, including
+        // literal "hex:ff" and the empty string. Escape every non-ASCII scalar
+        // so invisible characters, homoglyphs and Unicode normalization cannot
+        // disguise the bytes a person is approving. This is display-only;
+        // these strings must never be reconstructed into a shell command.
+        var output = "\""
         for scalar in text.unicodeScalars {
-            if scalar.value < 0x20 || scalar.value == 0x7f || isUnsafe(scalar) {
+            if scalar == "\\" || scalar == "\"" {
+                output += "\\"
+                output.unicodeScalars.append(scalar)
+            } else if !(0x20...0x7e).contains(scalar.value) {
                 output += "\\u{\(String(scalar.value, radix: 16, uppercase: true))}"
             } else {
                 output.unicodeScalars.append(scalar)
             }
         }
-        return output.isEmpty ? "(empty)" : output
+        return output + "\""
     }
 
     static func likelyContainsSecret(_ data: Data) -> Bool {
@@ -26,12 +34,4 @@ enum SafeDisplay {
         return secretWords.contains { text.contains($0) }
     }
 
-    private static func isUnsafe(_ scalar: Unicode.Scalar) -> Bool {
-        switch scalar.value {
-        case 0x200b...0x200f, 0x202a...0x202e, 0x2060...0x2069, 0xfeff:
-            true
-        default:
-            scalar.properties.isWhitespace && scalar != " " && scalar != "\t"
-        }
-    }
 }

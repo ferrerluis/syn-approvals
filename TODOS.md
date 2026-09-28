@@ -107,3 +107,25 @@ Separate from TODO 1. This improves the download-and-open experience; it does no
 - [ ] Until this passes, clearly document the experimental build's signing limitations and expected security prompts; do not instruct users to disable system-wide protections.
 
 Acceptance: the downloaded DMG installs and opens through the normal macOS confirmation flow without a manual security override. Notarization is not a substitute for an independent security review.
+
+## 6. Make the repository public
+
+Separate from TODO 1 and from the landing site. Syn can remain explicitly experimental when the repository becomes public.
+
+- [ ] Audit the repository and Git history for credentials, private machine details, test artifacts and other material that should not be published.
+- [ ] Add or verify the public license, contribution guidance, security-reporting instructions and experimental-release disclaimer.
+- [ ] Change the GitHub repository visibility to public without replacing existing releases, tags, issues or pull-request history.
+- [ ] Verify anonymous clone access and anonymous downloads through the README's latest experimental release link.
+
+Acceptance: a signed-out user can inspect the repository, clone it and download the documented experimental release without receiving a private-repository error.
+
+## 7. Public landing site
+
+Separate from repository visibility and Mac signing/notarization. Use free hosting where practical.
+
+- [ ] Build a concise product site explaining what Syn does, who it is for, its Mac and remote-machine requirements, and the approval/password-recovery experience.
+- [ ] Link directly to the latest experimental Mac download, GitHub repository, installation guide, security model and known limitations.
+- [ ] Include current product screenshots or a short feature-first walkthrough covering download, setup, approval, updates and recovery.
+- [ ] Publish it on a stable public URL and verify that download and documentation links remain current as new releases ship.
+
+Acceptance: a new user can understand Syn, confirm that their setup is supported, download it and reach the installation instructions from one public page.

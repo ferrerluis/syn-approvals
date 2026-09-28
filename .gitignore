@@ -2,6 +2,7 @@
 /.tools/
 /dist/
 /test-runs/
+/output/
 /.build/
 /macos/.build/
 /macos/Syn.app/
@@ -11,5 +12,12 @@
 *.key
 *.crt
 *.der
+.env
+.env.*
+!.env.example
+id_rsa
+id_ed25519
+*.pfx
+*.mobileprovision
 .DS_Store
 __pycache__/

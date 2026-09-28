@@ -1,0 +1,7 @@
+title = "Syn secret scanning"
+
+[extend]
+useDefault = true
+
+# Do not blanket-exclude tests, fixtures, documentation or old commits.
+# Published deterministic protocol keys are synthetic, not installed identities.

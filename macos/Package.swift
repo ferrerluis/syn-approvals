@@ -14,6 +14,7 @@ let package = Package(
             resources: [
                 .copy("Resources/Branding/syn-app-icon-light.png"),
                 .copy("Resources/Branding/syn-app-icon-dark.png"),
+                .copy("Resources/Branding/syn-menu-icon-idle.png"),
                 .copy("Resources/Branding/syn-menu-icon.svg"),
             ],
             swiftSettings: [.swiftLanguageMode(.v6)]
