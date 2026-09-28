@@ -2,7 +2,7 @@
 
 Syn is pre-release privileged software. Public source and experimental builds are available, but there are no supported releases yet.
 
-Do not publish proof-of-concept exploits before coordinated disclosure. Report suspected vulnerabilities privately to the repository owner with:
+Do not publish proof-of-concept exploits before coordinated disclosure. [Report a vulnerability privately through GitHub](https://github.com/ferrerluis/syn-approvals/security/advisories/new) with:
 
 - the affected revision;
 - the trust boundary crossed;

@@ -112,10 +112,10 @@ Acceptance: the downloaded DMG installs and opens through the normal macOS confi
 
 Separate from TODO 1 and from the landing site. Syn can remain explicitly experimental when the repository becomes public.
 
-- [ ] Audit the repository and Git history for credentials, private machine details, test artifacts and other material that should not be published.
-- [ ] Add or verify the public license, contribution guidance, security-reporting instructions and experimental-release disclaimer.
-- [ ] Change the GitHub repository visibility to public without replacing existing releases, tags, issues or pull-request history.
-- [ ] Verify anonymous clone access and anonymous downloads through the README's latest experimental release link.
+- [x] Audit the repository and Git history for credentials, private machine details, test artifacts and other material that should not be published. See the [audit record](docs/validation/2026-09-27-repository-audit.md) for scope and limits.
+- [x] Add or verify the public license, contribution guidance, security-reporting instructions and experimental-release disclaimer.
+- [x] Change the GitHub repository visibility to public without replacing existing releases, tags, issues or pull-request history.
+- [x] Verify anonymous clone access and anonymous downloads through the README's latest experimental release link.
 
 Acceptance: a signed-out user can inspect the repository, clone it and download the documented experimental release without receiving a private-repository error.
 
