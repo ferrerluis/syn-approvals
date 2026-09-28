@@ -11,7 +11,7 @@ The remote machine must already be reachable by that hostname, accept SSH for th
 
 ## Install the experimental Mac build
 
-1. [Download the latest experimental Mac ZIP](https://github.com/ferrerluis/syn-approvals/releases/latest/download/Syn-macOS-latest-experimental.zip). A private repository requires a GitHub account with access.
+1. [Download the latest experimental Mac ZIP](https://github.com/ferrerluis/syn-approvals/releases/latest/download/Syn-macOS-latest-experimental.zip).
 2. Open the ZIP and move **Syn.app** into **Applications**.
 3. Open Syn. The current ad-hoc-signed build may require macOS's per-app **Open Anyway** confirmation in **System Settings → Privacy & Security**; do not disable Gatekeeper or other system-wide protections.
 4. Choose whether Syn should start when you log in, then select **Add a machine** and enter its reachable hostname, SSH account, and optional port.
@@ -63,7 +63,7 @@ To remove the Mac's maintenance access locally, run `sudo /var/lib/syn/maintenan
 - Remote candidate: Ubuntu 26.04 ARM64 with classic `sudo.ws` 1.9.x. A Raspberry Pi 5 is the tested hardware example, not a product name or a requirement.
 - Mac candidate: macOS 15 or newer on a Secure Enclave-capable Apple silicon Mac.
 - Topology: one managed remote account and one approving Mac per remote target; one Mac may store several targets.
-- Distribution: the repository and experimental artifacts may still require authenticated private-repository access. Do not assume an anonymous public download exists.
+- Distribution: source and experimental release assets are publicly accessible. Syn has not received an independent security review; treat these builds as experimental.
 - Signing: current development builds use ad-hoc signing and are not Developer ID signed or notarized. They may produce normal macOS provenance/security prompts; do not disable system-wide protections to bypass them.
 
 See [implementation status](docs/implementation-status.md), [protocol](docs/protocol.md), [threat model](docs/threat-model.md), [recovery](docs/recovery.md), and the [SSH maintenance contract](docs/ssh-maintenance-contract.md) before live use.

@@ -1,8 +1,8 @@
 # Security policy
 
-Syn is pre-release privileged software. There are no supported public releases yet.
+Syn is pre-release privileged software. Public source and experimental builds are available, but there are no supported releases yet.
 
-Do not file public proof-of-concept exploits while the repository is private. Report suspected vulnerabilities directly to the repository owner with:
+Do not publish proof-of-concept exploits before coordinated disclosure. Report suspected vulnerabilities privately to the repository owner with:
 
 - the affected revision;
 - the trust boundary crossed;

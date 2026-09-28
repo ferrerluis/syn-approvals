@@ -1,6 +1,6 @@
 # Contributing
 
-Syn is private until an independent security review is complete. During the private alpha, changes should be small, reviewable, and tied to one documented threat or acceptance criterion.
+Syn's source is public, but its releases remain experimental until an independent security review is complete. Changes should be small, reviewable, and tied to one documented threat or acceptance criterion.
 
 ## Before opening a change
 
