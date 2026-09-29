@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/branding/light/syn-app-icon-light.png" width="112" height="112" alt="Syn logo"></p>
+![Syn — Remote approvals that meet you where you are](assets/branding/syn-readme-banner.png)
 
 # Syn
 
