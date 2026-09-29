@@ -2,7 +2,7 @@
 
 # Syn
 
-**Approve each remote `sudo` request separately from your Mac.**
+**Approve each remote `sudo` request from your Mac.**
 
 If an agent working on your Ubuntu machine needs `sudo` to install a package, Syn pauses that request and shows it on your Mac. You can review the machine, account, executable, and arguments, then choose **Approve once** with Touch ID or your Mac login password, or choose **Deny**. Syn also works for commands you start yourself: it gates eligible invocations by one configured account after normal sudo policy, without trying to tell a human from an agent.
 
