@@ -2,12 +2,14 @@
 
 # Syn
 
-Syn lets a Mac approve one privileged action on a remote machine at a time. Download the Mac release, open Syn, choose **Add a machine**, and provide only the remote hostname, SSH account, and optional port. The exactly matching remote source and helper are already bundled inside the Mac release.
+Syn lets a Mac approve each privileged invocation on a remote machine separately. Download the Mac release, open Syn, choose **Add a machine**, and provide the remote hostname, SSH account, and optional SSH port. The exactly matching remote source and helper are already bundled inside the Mac release.
 
-The remote machine must already be reachable by that hostname, accept SSH for the selected account, and allow that account to use `sudo`. Setup uses SSH only to inspect, transfer, build, install, pair, update, recover, or uninstall Syn; everyday approval requests use a direct mutually authenticated TLS connection to the saved hostname, with no SSH tunnel, VPN-provider integration, or Syn cloud relay.
+The remote machine must already be reachable by that hostname, accept SSH for the selected account, and allow that account to use `sudo`. The Mac must also reach the remote machine directly on TCP port 41781 for approval requests; SSH access through a proxy alone is insufficient. Setup uses SSH to inspect, transfer, build, install, pair, update, recover, or uninstall Syn; everyday approvals use a direct mutually authenticated TLS connection to the saved hostname, with no SSH tunnel, VPN-provider integration, or Syn cloud relay.
 
 > [!WARNING]
 > The Mac-led flow is a security-sensitive experimental release. Its [12-case hybrid acceptance suite](docs/onboarding-e2e-test-plan.md) passed with the [documented live/component boundaries](docs/validation/2026-09-14-onboarding-e2e-results.md), but Syn has not received an independent security review.
+
+Before setup or update, verify independent root-console or Ubuntu recovery access that works without Syn or the Mac. Keep that access available until ordinary password sudo or the completed Syn installation and its recovery path have been verified.
 
 ## Install the experimental Mac build
 
@@ -22,7 +24,7 @@ The Mac release already contains the exact remote source and helper it will inst
 
 When the configured remote account invokes an eligible `sudo` command, the remote plug-in signs the exact executable, arguments, working directory, identities, and environment digest. The Mac shows that one request and signs either one approval or one denial after macOS user-presence authentication.
 
-The request expires after 90 seconds. In an interactive terminal, pressing Enter while the request is still pending cancels that request and opens the remote machine's normal password prompt immediately; ordinary timeout or Mac unavailability can also use password authentication. Explicit denial, invalid data, replay, local policy rejection, and non-interactive use fail closed.
+The request expires after 90 seconds. In an interactive terminal, pressing Enter while the request is still pending cancels it and opens the remote machine's normal password prompt immediately; ordinary timeout or Mac unavailability can also use password authentication. A signed denial received by the remote machine, invalid data, replay, and local policy rejection fail closed. If the Mac cannot confirm delivery of a denial, check the original remote invocation: it may still offer password fallback after timeout. Non-interactive `sudo` can succeed with a Mac approval, but cannot use Enter or password fallback and fails if unanswered.
 
 The Mac may use Touch ID or the Mac login password through the system authentication prompt. During everyday sudo use, the remote account password stays in the remote PAM conversation: Syn does not send it to the Mac, save it, or place it in command arguments.
 
@@ -32,7 +34,7 @@ For first setup, Syn shows one command to run in a trusted administrator termina
 
 The candidate flow is:
 
-1. The Mac confirms the SSH host identity and inspects the remote platform and installed state with fixed, read-only operations.
+1. Compare the displayed SSH host fingerprints with a trusted source before accepting them. The Mac then inspects the remote platform and installed state with fixed, read-only operations.
 2. It verifies that the Mac app, ARM64 helper, and source archive carry the same compact UTC release ID and exact Git commit.
 3. On first setup, it transfers the helper and shows the one-time command. Run it in a trusted remote administrator session, then click **I've run the command — continue**. The command verifies the helper's root-owned copy before authorizing the restricted maintenance key; future updates reuse that access.
 4. The remote builds as a locked non-administrator account, installs the exact package, preserves or creates identities, and returns a certificate-pinned profile over SSH.
@@ -44,7 +46,7 @@ The separate maintenance SSH key stays in a private directory under the Mac's `~
 
 ## Connections and versions
 
-The remote agent listens on the server-side address selected during SSH setup, while the Mac reconnects through the hostname the user supplied. Reachability can come from a LAN, an existing private network, or another route the user controls; Syn neither configures a network provider nor opens public ingress.
+The remote agent listens on the server-side address selected during SSH setup, on TCP port 41781, while the Mac reconnects through the hostname the user supplied. Reachability can come from a LAN, an existing private network, or another route the user controls; Syn neither configures a network provider nor opens public ingress.
 
 Approval messages bind both endpoints to the exact compiled release ID and commit. A valid signature from another release is still rejected, and the Mac reports a mismatch as update required rather than attempting approval.
 
@@ -54,9 +56,9 @@ Approval messages bind both endpoints to the exact compiled release ID and commi
 
 If setup disconnects or stops after privileged state may exist, retry resumes from the protected operation journal or runs local recovery; it never treats a lost SSH reply as success. Recovery removes Syn's `NOPASSWD` rule first, restores ordinary password sudo and provider state, and retains protected keys and backups.
 
-Uninstall follows the same safety ordering, verifies that ordinary sudo is restored, then disables Syn's runtime service and removes the package. Pairing keys, the recovery helper, and sudo backups remain available for conservative recovery rather than being silently deleted.
+To stop using Syn, run `sudo /usr/bin/synctl uninstall --restore-local-sudo --apply` in a trusted terminal on the remote machine, then verify ordinary password sudo works. Uninstall follows the same safety ordering, revokes Syn's restricted maintenance SSH entry, disables its runtime service, and removes the package. Pairing keys, the recovery helper, and sudo backups remain available for conservative recovery rather than being silently deleted. The Mac app's **Remove** button only forgets the saved machine and stops its connection; it does not change remote sudo or pairing, so use it after remote uninstall.
 
-To remove the Mac's maintenance access locally, run `sudo /var/lib/syn/maintenance/synctl --json maintenance revoke --apply` in a trusted administrator session. Revocation removes only Syn's recorded SSH entry; unrelated keys and recovery access remain. A replacement Mac needs a new bootstrap after revocation.
+To revoke only the Mac's maintenance access while keeping Syn installed, run `sudo /var/lib/syn/maintenance/synctl --json maintenance revoke --apply` in a trusted administrator session on the remote machine. Revocation removes only Syn's recorded SSH entry; unrelated keys and recovery access remain. A replacement Mac needs a new bootstrap after revocation.
 
 ## Current support and distribution limits
 
@@ -66,7 +68,7 @@ To remove the Mac's maintenance access locally, run `sudo /var/lib/syn/maintenan
 - Distribution: source and experimental release assets are publicly accessible. Syn has not received an independent security review; treat these builds as experimental.
 - Signing: current development builds use ad-hoc signing and are not Developer ID signed or notarized. They may produce normal macOS provenance/security prompts; do not disable system-wide protections to bypass them.
 
-See [implementation status](docs/implementation-status.md), [protocol](docs/protocol.md), [threat model](docs/threat-model.md), [recovery](docs/recovery.md), and the [SSH maintenance contract](docs/ssh-maintenance-contract.md) before live use.
+See the [hybrid acceptance results](docs/validation/2026-09-14-onboarding-e2e-results.md), [September 9 implementation checkpoint](docs/implementation-status.md), [protocol](docs/protocol.md), [threat model](docs/threat-model.md), [recovery](docs/recovery.md), and the [SSH maintenance contract](docs/ssh-maintenance-contract.md) before live use.
 
 ## Repository layout
 
