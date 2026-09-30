@@ -6,6 +6,14 @@
 
 If an agent working on your Ubuntu machine needs `sudo` to install a package, Syn pauses that request and shows it on your Mac. You can review the machine, account, executable, and arguments, then choose **Approve once** with Touch ID or your Mac login password, or choose **Deny**. Syn also works for commands you start yourself: it gates eligible invocations by one configured account after normal sudo policy, without trying to tell a human from an agent.
 
+## Watch Syn in action
+
+[![Play the 20-second Syn commercial](assets/media/syn-commercial-poster.png)](https://d2ol7oe51mr4n9.cloudfront.net/user_3JzA4hCTdreir475NjS89N8dryd/a8958bd6-a883-4e99-9411-9f4612d3af2e.mp4)
+
+[Play the 20-second video](https://d2ol7oe51mr4n9.cloudfront.net/user_3JzA4hCTdreir475NjS89N8dryd/a8958bd6-a883-4e99-9411-9f4612d3af2e.mp4) · [Download the 1080p MP4](assets/media/syn-commercial.mp4)
+
+The video uses fictional machine and command details to illustrate an approval.
+
 ## Before you start
 
 - **Mac:** macOS 15 or newer on a Secure Enclave-capable Apple silicon Mac.
