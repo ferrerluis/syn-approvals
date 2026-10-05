@@ -1,0 +1,97 @@
+appId: org.syn-approvals.SynMobile.Debug
+---
+# Use only on an authorized isolated target with recovery available.
+# Its phone setup key must already be granted. Equal-release armed enrollment
+# uses connected.yaml instead; this flow expects full installation or update.
+# FINAL_DECISION is approve or deny; RESULT must match the expected final status.
+- launchApp
+- assertVisible: "Simulator development signer"
+- scrollUntilVisible:
+    element:
+      id: "add-machine"
+    direction: UP
+    timeout: 10000
+- runFlow:
+    when:
+      visible:
+        id: "add-machine"
+        text: "Add a machine"
+    commands:
+      - tapOn:
+          id: "add-machine"
+- tapOn:
+    id: "machine-host"
+- eraseText: 100
+- inputText: "${HOST}"
+- pressKey: enter
+- tapOn:
+    id: "machine-port"
+- eraseText: 10
+- inputText: "${PORT}"
+- pressKey: enter
+- tapOn:
+    id: "machine-user"
+- eraseText: 100
+- inputText: "${SOURCE_USER}"
+- pressKey: enter
+- tapOn:
+    id: "check-host"
+- extendedWaitUntil:
+    visible: "${FINGERPRINT}"
+    timeout: 20000
+- tapOn:
+    id: "trust-host"
+- scrollUntilVisible:
+    element:
+      id: "pair-machine"
+    direction: DOWN
+    timeout: 10000
+- tapOn:
+    id: "pair-machine"
+- scrollUntilVisible:
+    element:
+      id: "status"
+    direction: UP
+    timeout: 10000
+- extendedWaitUntil:
+    visible: "Approve the setup test request in Syn"
+    timeout: 900000
+- scrollUntilVisible:
+    element:
+      id: "approve-${TARGET_ID}:.*"
+    direction: DOWN
+    timeout: 10000
+- assertVisible: 'Source user: "${SOURCE_USER}" \(UID ${SOURCE_UID}\)'
+- assertVisible: '"/usr/bin/true"'
+- assertVisible: 'Warnings: "harmless_preflight"'
+- takeScreenshot: "${SCREENSHOT_PREFIX}-first"
+- tapOn:
+    id: "approve-${TARGET_ID}:.*"
+- scrollUntilVisible:
+    element:
+      id: "status"
+    direction: UP
+    timeout: 10000
+- extendedWaitUntil:
+    visible: "Approve the final verification request in Syn"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "${FINAL_DECISION}-${TARGET_ID}:.*"
+    direction: DOWN
+    timeout: 10000
+- assertVisible: 'Source user: "${SOURCE_USER}" \(UID ${SOURCE_UID}\)'
+- assertVisible: '"/usr/bin/true"'
+- assertVisible: 'Warnings: "harmless_preflight"'
+- takeScreenshot: "${SCREENSHOT_PREFIX}-final"
+- tapOn:
+    id: "${FINAL_DECISION}-${TARGET_ID}:.*"
+- scrollUntilVisible:
+    element:
+      id: "status"
+    direction: UP
+    timeout: 10000
+- extendedWaitUntil:
+    visible: "${RESULT}"
+    timeout: 30000
+- takeScreenshot: "${SCREENSHOT_PREFIX}-result"
