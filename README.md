@@ -33,7 +33,7 @@ The Mac ZIP already contains the matching remote source and helper; there is no 
 
 ## iPhone candidate
 
-An iPhone app is being developed in [`ios`](ios/README.md). It shares request verification and one-invocation signing with the Mac app, connects directly to the machine, and can receive generic Apple push alerts sent by that machine. The simulator approval flow has been visually exercised; real Pi approval and real background notification delivery are still acceptance gates. This candidate does not yet provide the Mac app's complete clean-install/update workflow.
+An iPhone app is being developed with React Native and Expo in [`mobile`](mobile/README.md). It reuses the native Swift security code and connects directly to paired machines. Codex can provide phone alerts for Codex-initiated work; Syn does not operate a push service. Real Pi approval remains an acceptance gate until recorded in the validation report.
 
 ## What an approval looks like
 

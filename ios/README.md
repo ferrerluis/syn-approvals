@@ -1,6 +1,6 @@
-# Syn for iPhone
+# Syn native iOS security sources
 
-This is an implementation candidate. It has passed a visible simulator-to-local-target approval round trip, including a second request needing a second tap. Raspberry Pi acceptance, real APNs background delivery, and physical iPhone Secure Enclave tests remain incomplete. The local harness never executes a command.
+The product app now lives in [`mobile`](../mobile/README.md). This directory retains the Swift candidate, native security sources, and a separate SwiftUI test harness; it is not the Expo generated native project. Raspberry Pi acceptance and hardware Secure Enclave testing remain distinct from local harness results.
 
 The iPhone connects to the same target agent directly over pinned TLS with its own client certificate. It shares canonical CBOR, signed request verification, safe byte display, decision binding, and release identity with macOS. **Approve** still applies to one live invocation. The first valid approval or denial resolves the request and cancels its display on other connected devices.
 
@@ -16,7 +16,7 @@ xcodebuild -project ios/SynIOS.xcodeproj -scheme SynIOS -configuration Debug \
   -derivedDataPath /tmp/syn-ios test
 ```
 
-Simulator development builds use all-zero release metadata. Physical-device and Release builds require `SYN_RELEASE_METADATA=/absolute/path/release.json`, a clean checkout at that exact commit, and the same release installed on the target. The build refuses development metadata outside a Debug simulator. Provisioning and APNs entitlements require an eligible Apple development team; no private signing inputs belong in this repository.
+Simulator development builds use all-zero release metadata. Physical-device and Release builds require `SYN_RELEASE_METADATA=/absolute/path/release.json`, a clean checkout at that exact commit, and the same release installed on the target. The build refuses development metadata outside a Debug simulator. Unsigned device compilation does not require Apple enrollment. Installing a standalone app on physical hardware requires suitable signing; hardware testing is outside simulator acceptance.
 
 ## Pair an additional iPhone
 
@@ -35,26 +35,12 @@ The maintenance key permits exactly two operations: enroll that same device ID a
 
 Advanced pairing can export the phone's public enrollment and import an independently trusted profile. Public enrollment contains the public signing keys and client certificate; private keys remain in the device Keychain. Identity labels from imported profiles are ignored.
 
-## Background alerts
+## Codex alerts
 
-The Pi sends a generic alert directly to Apple APNs. The phone opens a direct connection to retrieve and verify the actual request. Push messages carry no executable, arguments, environment, request ID, nonce, decision, approval URL, or bearer approval credential. An alert cannot authorize anything. The 90-second request lifetime continues while the app is suspended; opening an expired alert does not revive a request.
-
-An eligible Apple team, provisioned bundle ID, and APNs provider key are required. On the Pi, provision the `.p8` provider key as root-owned and readable only by root and the agent's trusted group; never store it in the repository. Add the optional agent configuration:
-
-```toml
-[apns]
-team_id = "TEAMID1234"
-key_id = "KEYID12345"
-topic = "org.syn-approvals.SynIOS.Debug"
-environment = "development"
-signing_key = "/etc/syn/apns.p8"
-state_file = "/var/lib/syn-notifications/tokens.json"
-```
-
-Use the production topic `org.syn-approvals.SynIOS` and environment `production` for the Release app. The agent accepts a token only from an authenticated enrolled iPhone connection. Systemd creates its private notification-state directory. APNs keys are separate from the target's authorization key; the unprivileged agent never obtains that target private key. Push setup or delivery failure does not disable the direct approval transport.
+Syn-owned APNs registration, delivery, and entitlements have been removed. See [`docs/codex-approvals.md`](../docs/codex-approvals.md) for Codex attention instructions and external notification requirements. A Codex reply cannot approve a request.
 
 ## Controlled visual test
 
 `Tests/Support/run_direct_target.py` is a test-only pinned-mTLS target on loopback. Install its Python requirements in a temporary environment. Prepare the simulator identity, obtain its public `Library/Application Support/Syn/enrollment.json` through `simctl get_app_container`, and start the harness using the built `syn-sim` binary. Import the generated public profile through Advanced pairing, then approve both fresh requests with Computer Use. Its status file records connection and verified approval counts without recording signed messages or command data.
 
-The harness does not validate sudo, Pi recovery, Meshnet, APNs receipt, Secure Enclave, or the mobile SSH setup path. Those remain distinct acceptance checks.
+The harness does not validate sudo, Pi recovery, Meshnet, Codex phone delivery, Secure Enclave, or the mobile SSH setup path. Those remain distinct acceptance checks.

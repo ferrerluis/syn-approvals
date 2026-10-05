@@ -12,5 +12,4 @@
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
 <key>NSFaceIDUsageDescription</key><string>Authenticate each approval for one remote invocation.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect directly to your paired machine for signed approval requests.</string>
-<key>SynAPNSEnvironment</key><string>$(SYN_APNS_ENVIRONMENT)</string>
 </dict></plist>

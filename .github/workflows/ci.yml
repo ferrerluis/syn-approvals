@@ -55,7 +55,6 @@ jobs:
       - run: cargo run --quiet --locked -p syn-protocol --example golden_vectors > /tmp/protocol-v2.json
       - run: cmp tests/fixtures/protocol-v2.json /tmp/protocol-v2.json
       - run: cmp tests/fixtures/protocol-v2.json macos/Tests/SynTests/Fixtures/protocol-v2.json
-      - run: cmp tests/fixtures/notification-registration-v1.json macos/Tests/SynTests/Fixtures/notification-registration-v1.json
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p syn-sudo-plugin --target aarch64-unknown-linux-gnu --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -123,6 +122,20 @@ jobs:
           name: remote-release
           path: ${{ runner.temp }}/release
           if-no-files-found: error
+
+  mobile-ui:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+        working-directory: mobile
+      - run: npm run typecheck && npm test && npx --no-install expo-doctor
+        working-directory: mobile
 
   macos:
     needs: [ubuntu-arm-release]

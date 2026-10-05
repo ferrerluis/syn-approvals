@@ -32,7 +32,6 @@ final class IOSModel: ObservableObject {
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
     private var failures: Set<String> = []
     private var foreground = false
-    private var pushToken: Data?
 
     init(fileURL: URL? = nil) throws {
         store = try TargetStore(fileURL: fileURL)
@@ -164,24 +163,6 @@ final class IOSModel: ObservableObject {
         if foreground { for target in targets { connect(target) } }
     }
 
-    func updatePushToken(_ token: Data) {
-        pushToken = token
-        for target in targets where connected.contains(target.id) { registerPush(for: target) }
-    }
-
-    private func registerPush(for target: TargetRecord) {
-        guard let pushToken, !pushToken.isEmpty, pushToken.count <= 256 else { return }
-        do {
-            let body = try CBORCodec.encode(.map([
-                (.unsigned(0), .unsigned(1)), (.unsigned(1), .bytes(pushToken)),
-                (.unsigned(2), .text(Bundle.main.object(forInfoDictionaryKey: "SynAPNSEnvironment") as? String ?? "development")),
-            ]))
-            let connection = connections[target.id]
-            Task { do { try await connection?.send(.init(kind: .notificationRegistration, body: body)) }
-                catch { self.error = "Notification registration could not reach the machine." } }
-        } catch { self.error = "Notification registration failed." }
-    }
-
     private func connect(_ target: TargetRecord) {
         guard foreground, connections[target.id] == nil else { return }
         reconnectTasks.removeValue(forKey: target.id)?.cancel()
@@ -210,7 +191,6 @@ final class IOSModel: ObservableObject {
                 Task {
                     do {
                         try await connection?.send(.init(kind: .hello, body: hello))
-                        self.registerPush(for: target)
                     } catch { self.disconnect(target, retry: true) }
                 }
             case .request:

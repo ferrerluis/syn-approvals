@@ -21,3 +21,11 @@ id_ed25519
 *.mobileprovision
 .DS_Store
 __pycache__/
+
+/mobile/node_modules/
+/mobile/.expo/
+/mobile/ios/
+/mobile/android/
+/mobile/modules/syn-native/ios/Frameworks/
+/mobile/artifacts/
+/mobile/native-build/

@@ -1,0 +1,44 @@
+{
+  "name": "syn-mobile",
+  "version": "0.1.0",
+  "main": "index.ts",
+  "dependencies": {
+    "expo": "57.0.26",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "syn-native": "file:modules/syn-native"
+  },
+  "devDependencies": {
+    "@testing-library/react-native": "13.3.3",
+    "@types/jest": "29.5.14",
+    "@types/react": "~19.2.2",
+    "agent-device": "0.21.20",
+    "expo-doctor": "1.20.4",
+    "jest": "29.7.0",
+    "jest-expo": "57.0.5",
+    "react-test-renderer": "19.2.3",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs && npm run test:ui",
+    "native:build": "bash scripts/build-native-core.sh",
+    "acceptance:build": "bash scripts/build-acceptance.sh",
+    "test:ui": "jest --runInBand",
+    "device:compile": "bash scripts/build-device.sh"
+  },
+  "private": true,
+  "overrides": {
+    "uuid": "11.1.1"
+  },
+  "expo": {
+    "autolinking": {
+      "nativeModulesDir": "./modules"
+    }
+  }
+}

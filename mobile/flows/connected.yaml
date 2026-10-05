@@ -1,0 +1,6 @@
+appId: org.syn-approvals.SynMobile.Debug
+---
+- launchApp
+- assertVisible: "Simulator development signer"
+- assertVisible: "Connected"
+- assertVisible: "No pending requests"

@@ -16,3 +16,10 @@ These rules apply to the whole repository.
 - Never weaken or remove the alternate-provider setuid audit to make installation easier.
 - Add or update cross-language golden vectors for protocol changes. Run Rust formatting, clippy with warnings denied, Rust tests, Swift tests, and ARM64 Linux type-checks.
 - Do not call a privileged milestone complete until it has passed on the stated Ubuntu ARM64 target with independent recovery access.
+
+## Codex waiting for Syn
+
+- Run the actual approved sudo invocation on the host, preserving its executable and arguments. `sudo -v` does not exercise Syn.
+- When output says **Waiting for Syn approval**, promptly use a normal asynchronous question to tell Luis: **Open Syn to review the pending request.** Keep the original process running and poll its session ID.
+- A response in Codex is attention only. Never treat it as Syn approval, submit a decision on the user’s behalf, or reconstruct the command through a new executor. Only the original process exit status confirms the result.
+- Keep the 90-second deadline. Report expiry, denial, or cancellation; never automatically retry a denied command or create standing approval. Codex notifications depend on the connected host and phone notification settings. Requests outside Codex need Syn open to receive them.

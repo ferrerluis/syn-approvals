@@ -1,0 +1,10 @@
+appId: org.syn-approvals.SynMobile.Debug
+---
+# Run only with a fresh harmless request pending on the real test target.
+- launchApp
+- assertVisible: "Connected"
+- assertVisible: "/usr/bin/true"
+- assertVisible: "Approves this invocation only."
+- assertVisible: "Approve"
+- tapOn: "Approve"
+- assertVisible: "No pending requests"

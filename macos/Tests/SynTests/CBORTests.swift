@@ -213,12 +213,3 @@ private extension Data {
         }
     }
 }
-
-@Test func notificationRegistrationGoldenVector() throws {
-    let url = try #require(Bundle.module.url(forResource: "notification-registration-v1", withExtension: "json", subdirectory: "Fixtures"))
-    let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
-    let token = try Data(hex: fixture["token_hex"] as! String)
-    let body = try CBORCodec.encode(.map([(.unsigned(0), .unsigned(1)), (.unsigned(1), .bytes(token)), (.unsigned(2), .text("development"))]))
-    #expect(body.hex == fixture["body_hex"] as? String)
-    #expect(try WireMessage(kind: .notificationRegistration, body: body).encoded().hex == fixture["wire_hex"] as? String)
-}

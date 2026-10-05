@@ -296,7 +296,7 @@ unsafe extern "C" fn plugin_check(
                 "Waiting for Syn approval. Press Enter to use this machine's password instead.\n",
             );
         } else {
-            hard_notice("Waiting for Syn approval on your Mac…\n");
+            hard_notice("Waiting for Syn approval…\n");
         }
         let signals = SignalGuard::install()?;
         let started = Instant::now();

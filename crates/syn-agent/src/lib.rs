@@ -1,4 +1,3 @@
-mod notifications;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -64,6 +63,17 @@ struct BoundApprover {
     denial_key: VerifyingKey,
 }
 
+impl BoundApprover {
+    fn collides_with(&self, other: &Self) -> bool {
+        self.device_id == other.device_id
+            || self.certificate_fingerprint == other.certificate_fingerprint
+            || self.approval_key == other.approval_key
+            || self.denial_key == other.approval_key
+            || self.approval_key == other.denial_key
+            || self.denial_key == other.denial_key
+    }
+}
+
 struct AgentState {
     target_id: String,
     target_key: VerifyingKey,
@@ -71,7 +81,6 @@ struct AgentState {
     approval_key: VerifyingKey,
     #[cfg(test)]
     denial_key: VerifyingKey,
-    notifications: Option<notifications::Notifications>,
     approvers: Vec<BoundApprover>,
     max_pending: usize,
     pending: Mutex<HashMap<String, PendingRequest>>,
@@ -112,39 +121,19 @@ impl Agent {
             for record in &registry.approvers {
                 let (approval_key, denial_key) = record.keys()?;
                 let fingerprint = record.certificate_fingerprint()?;
-                if approvers.iter().any(|peer| {
-                    peer.certificate_fingerprint == fingerprint
-                        || peer.approval_key == approval_key
-                        || peer.denial_key == approval_key
-                        || peer.approval_key == denial_key
-                        || peer.denial_key == denial_key
-                }) {
-                    bail!("additional approver collides with an existing identity");
-                }
-                approvers.push(BoundApprover {
+                let candidate = BoundApprover {
                     device_id: record.device_id.clone(),
                     certificate_fingerprint: fingerprint,
                     approval_key,
                     denial_key,
-                });
+                };
+                if approvers.iter().any(|peer| peer.collides_with(&candidate)) {
+                    bail!("additional approver collides with an existing identity");
+                }
+                approvers.push(candidate);
             }
         }
         let tls_acceptor = TlsAcceptor::from(Arc::new(load_tls_config(&config)?));
-        let notifications = config
-            .apns
-            .clone()
-            .and_then(|config| {
-                notifications::Notifications::start(
-                    config,
-                    &approvers
-                        .iter()
-                        .skip(1)
-                        .map(|p| p.device_id.clone())
-                        .collect::<Vec<_>>(),
-                ).map_err(|_| {
-                    tracing::warn!("Apple notifications are unavailable; direct approval transport remains available");
-                }).ok()
-            });
         let (event_tx, _) = broadcast::channel(REQUEST_BROADCAST_CAPACITY);
         Ok(Self {
             state: Arc::new(AgentState {
@@ -154,7 +143,6 @@ impl Agent {
                 approval_key,
                 #[cfg(test)]
                 denial_key,
-                notifications,
                 approvers,
                 max_pending: config.max_pending,
                 pending: Mutex::new(HashMap::new()),
@@ -361,15 +349,6 @@ async fn handle_local(
     }
     let request_event = WireMessageV1::new(message_kind::REQUEST, message.body.to_vec())?;
     let _ = state.event_tx.send(request_event);
-    if let Some(notifications) = &state.notifications {
-        // Expiry only: no command fields enter the notification worker.
-        let request =
-            syn_protocol::verify_request(message.body.as_slice(), &state.target_key)?.request;
-        let expiry = (request.issued_at_unix_ms + i64::from(request.ttl_ms)) / 1000;
-        if let Ok(expiry) = u64::try_from(expiry) {
-            notifications.notify(expiry);
-        }
-    }
 
     enum LocalOutcome {
         Decision(Vec<u8>),
@@ -556,9 +535,6 @@ async fn handle_network(
                                     return Err(error);
                                 }
                             },
-                            message_kind::NOTIFICATION_REGISTRATION => {
-                                register_notifications(message.body.as_slice(), &state, &peer).await?;
-                            },
                             message_kind::PING => send_wire(&mut websocket, WireMessageV1::new(message_kind::PONG, message.body.to_vec())?).await?,
                             _ => {
                                 hard_fail_pending(&state).await;
@@ -582,40 +558,6 @@ async fn handle_network(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-        }
-    }
-    Ok(())
-}
-
-async fn register_notifications(
-    signed_body: &[u8],
-    state: &AgentState,
-    peer: &BoundApprover,
-) -> Result<()> {
-    let registration = (|| -> Result<syn_protocol::NotificationRegistrationV1> {
-        if peer.device_id == "mac-primary" {
-            bail!("legacy Mac identity cannot register mobile push");
-        }
-        let registration: syn_protocol::NotificationRegistrationV1 =
-            syn_protocol::decode_canonical(signed_body)?;
-        registration.validate()?;
-        Ok(registration)
-    })();
-    let registration = match registration {
-        Ok(registration) => registration,
-        Err(error) => {
-            hard_fail_pending(state).await;
-            return Err(error);
-        }
-    };
-    if let Some(notifications) = &state.notifications {
-        if notifications
-            .register(&peer.device_id, registration)
-            .await
-            .is_err()
-        {
-            // Notification availability never changes authorization or exposes a token in logs.
-            tracing::warn!("Apple notification registration was not saved");
         }
     }
     Ok(())
@@ -905,7 +847,6 @@ mod tests {
             approval_key: *approval.verifying_key(),
             denial_key: *denial.verifying_key(),
             approvers: vec![],
-            notifications: None,
             max_pending: 4,
             pending: Mutex::new(HashMap::from([(
                 hex::encode(verified.request.request_id.as_slice()),
@@ -921,75 +862,6 @@ mod tests {
             event_tx,
         });
         (state, verified, approval, response_rx)
-    }
-
-    #[tokio::test]
-    async fn tls_and_notification_clients_use_one_compiled_crypto_provider() {
-        // An added HTTP dependency must not make rustls's default provider ambiguous.
-        let _ = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13]);
-        reqwest::Client::builder()
-            .https_only(true)
-            .no_proxy()
-            .build()
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn malformed_or_unauthorized_notification_registration_hard_fails_waiters() {
-        for case in ["cbor", "schema", "token", "environment", "legacy"] {
-            let (state, _request, approval, receiver) = state_with_pending().await;
-            let peer = BoundApprover {
-                device_id: if case == "legacy" {
-                    "mac-primary"
-                } else {
-                    "phone"
-                }
-                .into(),
-                certificate_fingerprint: [1; 32],
-                approval_key: *approval.verifying_key(),
-                denial_key: state.denial_key,
-            };
-            let registration = syn_protocol::NotificationRegistrationV1 {
-                schema_version: if case == "schema" { 2 } else { 1 },
-                token: if case == "token" { vec![] } else { vec![1; 32] }.into(),
-                environment: if case == "environment" {
-                    "invalid"
-                } else {
-                    "development"
-                }
-                .into(),
-            };
-            let body = if case == "cbor" {
-                vec![0xff]
-            } else {
-                encode_canonical(&registration).unwrap()
-            };
-            assert!(register_notifications(&body, &state, &peer).await.is_err());
-            assert!(matches!(
-                receiver.await.unwrap(),
-                LocalResponse::IntegrityFailure
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn disabled_push_keeps_a_valid_direct_connection_and_request() {
-        let (state, _request, approval, _receiver) = state_with_pending().await;
-        let peer = BoundApprover {
-            device_id: "phone".into(),
-            certificate_fingerprint: [1; 32],
-            approval_key: *approval.verifying_key(),
-            denial_key: state.denial_key,
-        };
-        let registration = syn_protocol::NotificationRegistrationV1 {
-            schema_version: 1,
-            token: vec![1; 32].into(),
-            environment: "development".into(),
-        };
-        register_notifications(&encode_canonical(&registration).unwrap(), &state, &peer)
-            .await
-            .unwrap();
-        assert_eq!(state.pending.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -1024,7 +896,6 @@ mod tests {
             approval_key: *generate_signing_key().verifying_key(),
             denial_key: *generate_signing_key().verifying_key(),
             approvers: vec![],
-            notifications: None,
             max_pending: 4,
             pending: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashMap::new()),
@@ -1064,7 +935,6 @@ mod tests {
                 approval_key: *approver.verifying_key(),
                 denial_key: *generate_signing_key().verifying_key(),
                 approvers: vec![],
-                notifications: None,
                 max_pending: 4,
                 pending: Mutex::new(HashMap::new()),
                 resolved: Mutex::new(HashMap::new()),
@@ -1231,6 +1101,37 @@ mod tests {
         ));
         assert!(state.pending.lock().await.is_empty());
     }
+    #[test]
+    fn primary_and_additional_identity_aliases_are_rejected() {
+        let first = BoundApprover {
+            device_id: "mac-primary".into(),
+            certificate_fingerprint: [1; 32],
+            approval_key: *generate_signing_key().verifying_key(),
+            denial_key: *generate_signing_key().verifying_key(),
+        };
+        let second = BoundApprover {
+            device_id: "phone".into(),
+            certificate_fingerprint: [2; 32],
+            approval_key: *generate_signing_key().verifying_key(),
+            denial_key: *generate_signing_key().verifying_key(),
+        };
+        assert!(!first.collides_with(&second));
+        let mut changed = second.clone();
+        changed.device_id.clone_from(&first.device_id);
+        assert!(first.collides_with(&changed));
+        changed = second.clone();
+        changed.certificate_fingerprint = first.certificate_fingerprint;
+        assert!(first.collides_with(&changed));
+        for key in [first.approval_key, first.denial_key] {
+            changed = second.clone();
+            changed.approval_key = key;
+            assert!(first.collides_with(&changed));
+            changed = second.clone();
+            changed.denial_key = key;
+            assert!(first.collides_with(&changed));
+        }
+    }
+
     #[tokio::test]
     async fn a_second_paired_device_cannot_reuse_the_first_devices_decision() {
         let (state, request, approval, receiver) = state_with_pending().await;

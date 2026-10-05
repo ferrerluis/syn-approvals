@@ -10,7 +10,7 @@ enum SynProtocolError: Error, LocalizedError {
 }
 
 enum SynMessageKind: UInt8, Sendable {
-    case hello = 1, request = 2, cancel = 3, decision = 4, result = 5, ping = 6, pong = 7, error = 8, unavailable = 9, notificationRegistration = 10
+    case hello = 1, request = 2, cancel = 3, decision = 4, result = 5, ping = 6, pong = 7, error = 8, unavailable = 9
 }
 
 struct WireMessage: Sendable {

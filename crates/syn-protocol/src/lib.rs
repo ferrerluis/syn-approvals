@@ -99,31 +99,6 @@ pub mod message_kind {
     pub const PONG: u8 = 7;
     pub const ERROR: u8 = 8;
     pub const UNAVAILABLE: u8 = 9;
-    pub const NOTIFICATION_REGISTRATION: u8 = 10;
-}
-
-/// A token is a notification destination only. This message grants no approval authority.
-#[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
-#[cbor(map)]
-pub struct NotificationRegistrationV1 {
-    #[n(0)]
-    pub schema_version: u16,
-    #[n(1)]
-    pub token: ByteVec,
-    #[n(2)]
-    pub environment: String,
-}
-impl NotificationRegistrationV1 {
-    pub fn validate(&self) -> Result<(), ProtocolError> {
-        if self.schema_version != 1
-            || self.token.is_empty()
-            || self.token.len() > 256
-            || !matches!(self.environment.as_str(), "development" | "production")
-        {
-            return Err(validation("invalid notification registration"));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Error)]
@@ -1047,46 +1022,5 @@ mod tests {
         let message = WireMessageV1::new(message_kind::PING, b"nonce".to_vec()).unwrap();
         let encoded = message.encode().unwrap();
         assert_eq!(WireMessageV1::decode(&encoded).unwrap(), message);
-    }
-}
-
-#[cfg(test)]
-mod notification_tests {
-    use super::*;
-    #[test]
-    fn cross_language_notification_registration_vector() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/notification-registration-v1.json"
-        ))
-        .unwrap();
-        let body = hex::decode(fixture["body_hex"].as_str().unwrap()).unwrap();
-        let registration: NotificationRegistrationV1 = decode_canonical(&body).unwrap();
-        registration.validate().unwrap();
-        assert_eq!(
-            registration.token.as_slice(),
-            (0_u8..32).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            hex::encode(encode_canonical(&registration).unwrap()),
-            fixture["body_hex"]
-        );
-        let wire = WireMessageV1::new(message_kind::NOTIFICATION_REGISTRATION, body).unwrap();
-        assert_eq!(hex::encode(wire.encode().unwrap()), fixture["wire_hex"]);
-    }
-    #[test]
-    fn rejects_empty_token_large_token_and_unknown_environment() {
-        for (token, environment) in [
-            (vec![], "development"),
-            (vec![0; 257], "development"),
-            (vec![0; 32], "other"),
-        ] {
-            assert!(NotificationRegistrationV1 {
-                schema_version: 1,
-                token: token.into(),
-                environment: environment.into()
-            }
-            .validate()
-            .is_err());
-        }
     }
 }

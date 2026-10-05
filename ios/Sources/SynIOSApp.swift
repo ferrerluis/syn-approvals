@@ -1,31 +1,8 @@
 import SwiftUI
 import UIKit
-import UserNotifications
-
-@MainActor
-final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    weak var model: IOSModel?
-    func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
-        UNUserNotificationCenter.current().delegate = self
-        return true
-    }
-    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken token: Data) {
-        model?.updatePushToken(token)
-    }
-    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
-        model?.error = "Apple push registration is unavailable. Direct approvals work while Syn is open."
-    }
-    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void) {
-        // A push is only a prompt to reconnect. Its contents cannot select or approve a request.
-        Task { @MainActor [weak self] in self?.model?.retry() }
-        completionHandler()
-    }
-}
 
 @main
 struct SynIOSApp: App {
-    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @Environment(\.scenePhase) private var phase
     @StateObject private var holder = ModelHolder()
     var body: some Scene {
@@ -34,7 +11,7 @@ struct SynIOSApp: App {
                 if let model = holder.model { SynIOSView(model: model) }
                 else { ContentUnavailableView("Syn could not start", systemImage: "exclamationmark.lock", description: Text(holder.error ?? "Storage is unavailable.")) }
             }
-            .task { delegate.model = holder.model; holder.model?.setForeground(true) }
+            .task { holder.model?.setForeground(true) }
             .onChange(of: phase) { _, value in holder.model?.setForeground(value == .active) }
         }
     }
@@ -141,16 +118,8 @@ struct IOSSetupView: View {
                         .disabled(model.profileText.isEmpty)
                 }
                 Section("Background alerts") {
-                    Text("Your Pi sends a generic alert through Apple. Open Syn to review the signed request directly; alerts never approve anything.")
-                    Button("Enable notifications") {
-                        Task {
-                            do {
-                                if try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) {
-                                    UIApplication.shared.registerForRemoteNotifications()
-                                }
-                            } catch { model.error = "Notifications could not be enabled." }
-                        }
-                    }
+                    Text("For Codex tasks, Codex can tell you when Syn needs attention. Open Syn to receive and review requests directly; a Codex response never approves them.")
+
                 }
                 if let error = model.error { Section { Text(error).foregroundStyle(.red) } }
             }.navigationTitle("Add a machine").toolbar { Button("Done") { dismiss() } }

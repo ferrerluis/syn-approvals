@@ -25,7 +25,7 @@ def main():
         tool = args.repository / 'scripts/release-tool.py'
         subprocess.run([sys.executable, str(tool), 'verify-checkout', '--metadata', str(args.metadata),
             '--repository', str(args.repository), '--source-input', 'ios', '--source-input', 'macos/Sources/Syn',
-            '--source-input', 'scripts/stage-ios-release.py'], check=True)
+            '--source-input', 'scripts/stage-ios-release.py', '--source-input', 'mobile'], check=True)
     args.destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.metadata, args.destination)
 

@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Syn",
+    "slug": "syn-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "org.syn-approvals.SynMobile.Debug",
+      "deploymentTarget": "18.0",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Authenticate each approval for one remote invocation.",
+        "NSLocalNetworkUsageDescription": "Connect directly to your paired machine for signed approval requests."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#f5f7f7",
+        "foregroundImage": "./assets/icon.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/icon.png"
+    },
+    "plugins": [
+      "./plugins/with-syn-native"
+    ],
+    "updates": {
+      "enabled": false
+    }
+  }
+}

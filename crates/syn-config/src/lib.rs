@@ -45,8 +45,6 @@ pub enum ConfigError {
 pub struct AgentConfig {
     #[serde(default)]
     pub approver_registry: Option<PathBuf>,
-    #[serde(default)]
-    pub apns: Option<APNSConfig>,
     pub schema_version: u16,
     pub target_id: String,
     pub listen: String,
@@ -76,9 +74,6 @@ impl AgentConfig {
 
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_optional_path(self.approver_registry.as_deref())?;
-        if let Some(apns) = &self.apns {
-            apns.validate()?;
-        }
         if self.schema_version != AGENT_CONFIG_SCHEMA_VERSION {
             return Err(ConfigError::Invalid(format!(
                 "unsupported agent schema version {}; expected {AGENT_CONFIG_SCHEMA_VERSION}",
@@ -406,6 +401,15 @@ fn default_blocked_executables() -> Vec<String> {
     .collect()
 }
 
+fn validate_optional_path(path: Option<&Path>) -> Result<(), ConfigError> {
+    if path.is_some_and(|p| p != Path::new("/etc/syn/approvers.json")) {
+        return Err(ConfigError::Invalid(
+            "security-sensitive path must be absolute".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +459,6 @@ mod tests {
     fn agent_config(listen: &str) -> AgentConfig {
         AgentConfig {
             approver_registry: None,
-            apns: None,
             schema_version: AGENT_CONFIG_SCHEMA_VERSION,
             target_id: "pi-development".into(),
             listen: listen.into(),
@@ -532,50 +535,5 @@ approver_ip = "100.64.0.11"
         )
         .unwrap();
         config.validate().unwrap();
-    }
-}
-
-fn validate_optional_path(path: Option<&Path>) -> Result<(), ConfigError> {
-    if path.is_some_and(|p| p != Path::new("/etc/syn/approvers.json")) {
-        return Err(ConfigError::Invalid(
-            "security-sensitive path must be absolute".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct APNSConfig {
-    pub team_id: String,
-    pub key_id: String,
-    pub topic: String,
-    pub environment: String,
-    pub signing_key: PathBuf,
-    pub state_file: PathBuf,
-}
-
-impl APNSConfig {
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        let identifier = |s: &str| {
-            s.len() == 10
-                && s.bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        };
-        if !identifier(&self.team_id)
-            || !identifier(&self.key_id)
-            || !matches!(
-                self.topic.as_str(),
-                "org.syn-approvals.SynIOS" | "org.syn-approvals.SynIOS.Debug"
-            )
-            || !matches!(self.environment.as_str(), "development" | "production")
-            || !self.signing_key.is_absolute()
-            || self.state_file != Path::new("/var/lib/syn-notifications/tokens.json")
-        {
-            return Err(ConfigError::Invalid(
-                "invalid Apple push configuration".into(),
-            ));
-        }
-        Ok(())
     }
 }

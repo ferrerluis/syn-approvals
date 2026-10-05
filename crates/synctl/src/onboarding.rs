@@ -1664,10 +1664,8 @@ fn configure_target(request: &OnboardingRequest, managed_uid: u32) -> Result<()>
     let prior_registry = prior_agent
         .as_ref()
         .and_then(|c| c.approver_registry.clone());
-    let prior_apns = prior_agent.as_ref().and_then(|c| c.apns.clone());
     let agent = AgentConfig {
         approver_registry: prior_registry.clone(),
-        apns: prior_apns,
         schema_version: syn_config::AGENT_CONFIG_SCHEMA_VERSION,
         target_id: request.target_id.clone(),
         listen: listen.to_string(),
