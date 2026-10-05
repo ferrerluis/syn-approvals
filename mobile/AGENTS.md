@@ -29,10 +29,11 @@ Run lint and typecheck before declaring any task done.
 - Import `Link`, `router`, and `useLocalSearchParams` from `expo-router`.
 - Docs: https://docs.expo.dev/router/introduction.md
 
-## Building with EAS
+## Syn build and security constraints
 
-Use EAS to build, sign, and submit the app in the cloud (`eas build`, `eas submit`) and to ship over-the-air updates (`eas update`) — no local Xcode or Android Studio required. Run EAS CLI as `bunx eas-cli <command>` in Bun projects, or `npx eas-cli@latest <command>` otherwise; substitute that for bare `eas` in docs examples.
-Docs: https://docs.expo.dev/eas/index.md
+The user requires local simulator acceptance with Metro stopped. Use the checked-in local build scripts. Embed JavaScript, keep remote updates disabled, and do not create push credentials or start Apple enrollment. EAS cloud builds or updates are outside this milestone.
+
+Root Syn engineering rules apply here. All pairing, certificate checks, keys and signing remain native. Do not add an arbitrary signer, executor or bearer approval route to the JavaScript bridge. The single current view uses inline setup/review cards; introduce Expo Router if navigation is added.
 
 ## Rules
 

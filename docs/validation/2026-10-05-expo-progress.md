@@ -16,9 +16,10 @@ This is an incomplete local candidate on `codex/ios-approver`, in the existing i
 
 | Check | Evidence |
 |---|---|
+| Expo lint | `npm run lint` passes |
 | TypeScript | `npm run typecheck` |
 | Typed state tests | 3 passed |
-| React Native UI tests | 4 passed; ID-only approval, expiry, denial during authentication, lifecycle disconnect |
+| React Native UI tests | 5 passed; ID-only approval, expiry, denial during authentication, lifecycle disconnect, approval while setup waits |
 | Expo Doctor | 21/21 passed |
 | Standalone simulator build | Xcode 26.6 / iOS 26.5, embedded release JavaScript, Metro absent on port 8081 |
 | Native iOS tests | 16 passed in the iPhone 17 Pro simulator |
@@ -28,7 +29,7 @@ This is an incomplete local candidate on `codex/ios-approver`, in the existing i
 | macOS Swift tests | 149 passed with warnings treated as errors |
 | Golden vectors | Rust regenerated protocol-v2 and both fixture copies matched |
 | ARM64 checks | workspace/all-targets type-check and sudo plugin Clippy with warnings denied |
-| Privacy / release staging | log privacy 4 tests; iOS release staging 2 tests |
+| Privacy / release staging | log privacy 4 tests; iOS release staging 3 tests, including generated-cache allowance and hidden-source rejection |
 
 Detailed local logs are under `/private/tmp/syn-expo-*` and `mobile/artifacts/`. Simulator UUID: `A0231B4A-C845-463B-BE74-8E5CBD9F2A04`. Screenshot `mobile/artifacts/01-standalone-start.png` proves app startup and its signer label. Screenshot `mobile/artifacts/02-real-pi-ssh-fingerprint.png` proves SSH contact with the real Pi; its displayed Ed25519 fingerprint matches an independent existing SSH session. Neither screenshot proves signed request reception or sudo execution.
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, AppState, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, AppState, Keyboard, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { native, readState } from './src/native';
 import { canApprove, parseState, type State } from './src/state';
@@ -14,6 +14,7 @@ export default function App() {
   const [host, setHost] = useState('');
   const [port, setPort] = useState('22');
   const [busy, setBusy] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     let mounted = true;
@@ -24,11 +25,13 @@ export default function App() {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => { mounted = false; listener?.remove(); active.remove(); clearInterval(timer); native?.setActive(false).catch(() => {}); };
   }, []);
-  const action = async (operation: () => Promise<unknown>) => {
-    if (busy) return;
-    setBusy(true); setError(undefined);
+  const action = async (operation: () => Promise<unknown>, kind: 'setup' | 'approval' = 'setup') => {
+    if (kind === 'approval' ? approving : busy) return;
+    Keyboard.dismiss();
+    const setWorking = kind === 'approval' ? setApproving : setBusy;
+    setWorking(true); setError(undefined);
     try { await operation(); setState(await readState()); } catch { setError('Syn could not complete that action. Check the connection and retry.'); }
-    finally { setBusy(false); }
+    finally { setWorking(false); }
   };
   return <SafeAreaView style={styles.safe}><StatusBar style="dark" /><ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
     <View style={styles.heading}><View><Text style={styles.title}>Syn</Text><Text style={styles.subtitle}>Review remote approvals</Text></View><Button testID="add-machine" label={setup ? 'Done' : 'Add a machine'} onPress={() => setSetup(!setup)} /></View>
@@ -55,7 +58,7 @@ export default function App() {
       <Text style={styles.secondary}>Working directory</Text><Text selectable style={styles.mono}>{request.workingDirectory}</Text>
       <Text style={styles.secondary}>{request.expiresAt <= now ? 'Expired' : `Expires in ${Math.ceil((request.expiresAt - now) / 1000)} seconds`}</Text>
       <Text style={styles.secondary}>Approves this invocation only.</Text>
-      <View style={styles.row}><View style={styles.flex}><Button testID={`approve-${request.id}`} label={request.authenticating ? 'Authenticating…' : 'Approve'} disabled={busy || !canApprove(request, now)} onPress={() => void action(() => native!.approve(request.id))} /></View><View style={styles.flex}><Button testID={`deny-${request.id}`} label="Deny" danger disabled={request.expiresAt <= now} onPress={() => void native!.deny(request.id).catch(() => setError('Denial delivery could not be confirmed.'))} /></View></View>
+      <View style={styles.row}><View style={styles.flex}><Button testID={`approve-${request.id}`} label={request.authenticating ? 'Authenticating…' : 'Approve'} disabled={approving || !canApprove(request, now)} onPress={() => void action(() => native!.approve(request.id), 'approval')} /></View><View style={styles.flex}><Button testID={`deny-${request.id}`} label="Deny" danger disabled={request.expiresAt <= now} onPress={() => void native!.deny(request.id).catch(() => setError('Denial delivery could not be confirmed.'))} /></View></View>
     </View>)}
     <Text style={styles.footer}>For Codex tasks, Codex can alert you when Syn needs attention. Open Syn to review the request directly.</Text>
     {state && <Text style={styles.footer}>Release {state.releaseID}</Text>}

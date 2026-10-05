@@ -8,6 +8,19 @@ import subprocess
 import sys
 
 
+# Enumerate compilation inputs, not generated projects, dependency caches or
+# framework output. verify-checkout still rejects ALL dirty/untracked files.
+MOBILE_INPUTS = (
+    'mobile/App.tsx', 'mobile/index.ts', 'mobile/src', 'mobile/native-core',
+    'mobile/modules/syn-native/ios/src', 'mobile/modules/syn-native/ios/SynNative.podspec',
+    'mobile/modules/syn-native/expo-module.config.json', 'mobile/modules/syn-native/package.json',
+    'mobile/modules/syn-native/index.ts', 'mobile/package.json', 'mobile/package-lock.json',
+    'mobile/app.json', 'mobile/app.config.js', 'mobile/app.config.ts',
+    'mobile/babel.config.js', 'mobile/metro.config.js', 'mobile/plugins', 'mobile/scripts',
+    'mobile/assets', 'mobile/tsconfig.json',
+)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--configuration', required=True)
@@ -23,9 +36,11 @@ def main():
             raise ValueError('development release metadata is restricted to Debug simulator builds')
     else:
         tool = args.repository / 'scripts/release-tool.py'
-        subprocess.run([sys.executable, str(tool), 'verify-checkout', '--metadata', str(args.metadata),
-            '--repository', str(args.repository), '--source-input', 'ios', '--source-input', 'macos/Sources/Syn',
-            '--source-input', 'scripts/stage-ios-release.py', '--source-input', 'mobile'], check=True)
+        command = [sys.executable, str(tool), 'verify-checkout', '--metadata', str(args.metadata),
+            '--repository', str(args.repository)]
+        for path in ('ios', 'macos/Sources/Syn', 'scripts/stage-ios-release.py', *MOBILE_INPUTS):
+            command.extend(('--source-input', path))
+        subprocess.run(command, check=True)
     args.destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.metadata, args.destination)
 

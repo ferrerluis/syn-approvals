@@ -134,7 +134,7 @@ jobs:
           cache-dependency-path: mobile/package-lock.json
       - run: npm ci
         working-directory: mobile
-      - run: npm run typecheck && npm test && npx --no-install expo-doctor
+      - run: npm run lint && npm run typecheck && npm test && npx --no-install expo-doctor
         working-directory: mobile
 
   macos:

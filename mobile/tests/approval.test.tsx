@@ -1,12 +1,13 @@
 import { jest, beforeEach, test, expect } from '@jest/globals';
 import React from 'react';
-import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import App from '../App';
 import { native, readState } from '../src/native';
 import type { State } from '../src/state';
 
 jest.mock('../src/native', () => ({
   native: { addListener: jest.fn(() => ({ remove: jest.fn() })), setActive: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    pair: jest.fn<() => Promise<void>>().mockResolvedValue(undefined),
     approve: jest.fn<() => Promise<void>>().mockResolvedValue(undefined), deny: jest.fn<() => Promise<void>>().mockResolvedValue(undefined), retry: jest.fn<() => Promise<void>>().mockResolvedValue(undefined) },
   readState: jest.fn(),
 }));
@@ -55,4 +56,20 @@ test('Leaving the app closes native connections', async () => {
   await waitFor(() => expect(native!.setActive).toHaveBeenCalledWith(true));
   ui.unmount();
   expect(native!.setActive).toHaveBeenLastCalledWith(false);
+});
+
+test('A waiting setup operation cannot block approval of its live preflight request', async () => {
+  const pairing = state(); pairing.setup.bootstrapCommand = 'Trusted administrator bootstrap';
+  jest.mocked(readState).mockResolvedValue(pairing);
+  let finishPairing!: () => void;
+  jest.mocked(native!.pair).mockImplementation(() => new Promise<void>(resolve => { finishPairing = resolve; }));
+  const ui = render(<App />);
+  await ui.findByText('Connected');
+  fireEvent.press(ui.getByTestId('add-machine'));
+  fireEvent.press(ui.getByTestId('pair-machine'));
+  expect(native!.pair).toHaveBeenCalled();
+  fireEvent.press(ui.getByTestId('approve-request-one'));
+  await waitFor(() => expect(native!.approve).toHaveBeenCalledWith('request-one'));
+  await act(async () => finishPairing());
+  ui.unmount();
 });

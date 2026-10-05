@@ -8,7 +8,7 @@ export SYN_MOBILE_VARIANT=development
 mkdir -p artifacts
 python3 "$repo_root/scripts/stage-ios-release.py" --configuration Debug --platform iphonesimulator --metadata "$metadata" --destination "$mobile_root/artifacts/acceptance-release.json" --repository "$repo_root"
 # Rebuild native code from this checkout before every acceptance build.
-SYN_CORE_CONFIGURATION=Debug SYN_CORE_PLATFORM=iphonesimulator bash scripts/build-native-core.sh
+SYN_CORE_CONFIGURATION=Debug SYN_CORE_PLATFORM=iphonesimulator SYN_CORE_OUTPUT="$mobile_root/modules/syn-native/ios/Frameworks/SynMobileCore.xcframework" bash scripts/build-native-core.sh
 npx --no-install expo prebuild --platform ios --no-install
 pod install --project-directory=ios
 cp artifacts/acceptance-release.json ios/Syn/release.json
