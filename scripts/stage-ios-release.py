@@ -38,7 +38,7 @@ def main():
         tool = args.repository / 'scripts/release-tool.py'
         command = [sys.executable, str(tool), 'verify-checkout', '--metadata', str(args.metadata),
             '--repository', str(args.repository)]
-        for path in ('ios', 'macos/Sources/Syn', 'scripts/stage-ios-release.py', *MOBILE_INPUTS):
+        for path in ('ios', 'macos/Sources/Syn', 'scripts/stage-ios-release.py', 'scripts/stage-mobile-setup.py', *MOBILE_INPUTS):
             command.extend(('--source-input', path))
         subprocess.run(command, check=True)
     args.destination.parent.mkdir(parents=True, exist_ok=True)

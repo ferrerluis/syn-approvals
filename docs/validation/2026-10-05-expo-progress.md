@@ -35,7 +35,7 @@ Detailed local logs are under `/private/tmp/syn-expo-*` and `mobile/artifacts/`.
 
 ## Outstanding acceptance
 
-Phone-first installation, matching-release updates and rollback are not implemented yet. Automatic approval review rejected the proposed root installer/forced SSH endpoint change as too broad without specific approval; a separate, bounded scope was presented for approval. No edits from that rejected call were applied. The Mac maintenance key and recovery route remain untouched.
+The user approved the bounded phone installer/recovery scope. The candidate now implements per-phone retained helpers/account bindings, fixed bounded uploads with permanent privilege removal, phone-first/additional identities, native matching-release setup/update and phone-only setup-key revocation. Isolated ARM64 installation/update/rollback and live acceptance remain unverified. The Mac maintenance key and real-Pi recovery route have not been changed.
 
 The real Pi runs its prior release and does not yet have mobile enrollment commands. A matching candidate must be installed only after isolated Ubuntu ARM64 testing with independent recovery access. Required real-Pi proof remains: Connected, signed pending request, Approve, the original `/usr/bin/sudo -n /usr/bin/true` exits zero, a fresh repeat needs approval, and Mac pairing still works. Live race/failure checks are still pending. The unsigned production Expo app compiled successfully at candidate `1e5766814011f6261627a26d08e2ff7d34993425`, with embedded JavaScript, a Secure Enclave symbol, and no simulator signer in its native framework. Subsequent review checkpoint builds are recorded separately with their exact source commit in local evidence.
 
@@ -58,3 +58,9 @@ These packages occur in the Expo/Metro tooling dependency graph. Syn request aut
 ## Scope limits and cleanup
 
 Apple enrollment, physical-device installation, hardware Secure Enclave proof and real Codex phone notification delivery are outside simulator acceptance. No Syn push credentials were created. Generated projects, dependencies, framework output, VM keys and local evidence are ignored or outside the repository. Keep the worktree and VM artifacts until acceptance finishes; record final recovery checks and remove disposable access when testing ends.
+
+## Approved installer candidate checks
+
+The new installer regressions reject unsupported commands/paths, partial or changed uploads, symlinks, other-device/account requests and development signing without an explicit grant. A shared `mobile-onboarding-v1.json` golden is decoded and re-encoded by Rust, macOS Swift and iOS Swift. The mobile UI also rejects setup controls after changing the Linux account.
+
+Host Rust tests: 110 passed (one platform-specific test ignored); macOS Swift: 150 passed; mobile: 5 state and 10 UI tests; native iOS: 20 tests passed after the profile-import adjustment. Formatting, host/ARM64 Clippy, TypeScript and Expo lint pass at the checked candidate stages. Exact non-development builds and live guest execution must still be completed for this installer candidate.

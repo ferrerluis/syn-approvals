@@ -31,8 +31,8 @@ public final class SynNativeModule: Module {
             try await SynMobileService.open().setActive(active)
         }
         AsyncFunction("retry") { () async throws in try await SynMobileService.open().retry() }
-        AsyncFunction("checkHost") { (host: String, port: Int) async throws in
-            try await SynMobileService.open().checkHost(host, port: port)
+        AsyncFunction("checkHost") { (host: String, port: Int, user: String) async throws in
+            try await SynMobileService.open().checkHost(host, port: port, user: user)
         }
         AsyncFunction("trustHost") { () async throws in try await SynMobileService.open().trustHost() }
         AsyncFunction("pair") { () async throws in try await SynMobileService.open().pair() }

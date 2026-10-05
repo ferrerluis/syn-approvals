@@ -124,3 +124,20 @@ test('Changing the hostname hides stale fingerprint trust and enrollment control
   expect(native!.pair).not.toHaveBeenCalled();
   ui.unmount();
 });
+
+
+test('Changing the Linux account hides setup controls bound to another account', async () => {
+  const checked = state(); checked.setup.user = 'ferrerluis';
+  checked.setup.fingerprint = 'SHA256:independently-verified';
+  checked.setup.bootstrapCommand = 'Trusted administrator bootstrap';
+  jest.mocked(readState).mockResolvedValue(checked);
+  const ui = render(<App />);
+  await ui.findByText('Connected');
+  fireEvent.press(ui.getByTestId('add-machine'));
+  expect(ui.getByTestId('pair-machine')).toBeTruthy();
+  fireEvent.changeText(ui.getByTestId('machine-user'), 'another-user');
+  expect(ui.queryByTestId('pair-machine')).toBeNull();
+  expect(ui.queryByTestId('trust-host')).toBeNull();
+  expect(native!.pair).not.toHaveBeenCalled();
+  ui.unmount();
+});

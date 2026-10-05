@@ -97,6 +97,7 @@ pub fn revoke(device: &str, apply: bool) -> Result<serde_json::Value> {
             persist(&agent, &plugin, &registry)?;
         }
         revoke_mobile_key(device)?;
+        crate::maintenance::revoke_mobile_if_present(device)?;
     }
     Ok(serde_json::json!({"device_id":device,"revoked":apply}))
 }
@@ -354,12 +355,13 @@ pub fn serve(device: &str) -> Result<()> {
     }
     Ok(())
 }
-fn print_profile(device: &str) -> Result<()> {
+pub(crate) fn print_profile(device: &str) -> Result<()> {
     let (agent, _) = configs()?;
     if !registry(&agent)?
         .approvers
         .iter()
         .any(|p| p.device_id == device)
+        && primary_mobile()?.is_none_or(|p| p.device_id != device)
     {
         bail!("device is not enrolled");
     }
@@ -370,12 +372,14 @@ fn print_profile(device: &str) -> Result<()> {
     .context("target TLS certificate missing")??;
     let target_key =
         syn_protocol::verifying_key_from_pem(&fs::read_to_string(&agent.target_public_key)?)?;
+    let release =
+        crate::maintenance::installed_metadata()?.context("installed release metadata missing")?;
     let profile = serde_json::json!({"targetID":agent.target_id,"displayName":agent.target_id,
         "webSocketURL":format!("wss://{}",agent.listen),
         "targetPublicKeyBase64":STANDARD.encode(syn_protocol::verifying_key_sec1(&target_key)),
         "serverCertificateSHA256Hex":hex::encode(Sha256::digest(cert.as_ref())),
         "clientIdentityLabel":format!("Syn iOS {device} transport"),
-        "installedReleaseID":syn_protocol::release_id(),"installedReleaseCommit":syn_protocol::release_commit()});
+        "installedReleaseID":release.release_id,"installedReleaseCommit":release.commit});
     println!("{}", profile);
     Ok(())
 }
@@ -415,6 +419,140 @@ pub fn allow_development(device: &str) -> Result<()> {
         b"allowed\n",
         0o600,
     )
+}
+
+const PRIMARY_MOBILE: &str = "/etc/syn/primary-mobile.json";
+fn primary_mobile() -> Result<Option<ApproverRecord>> {
+    match fs::symlink_metadata(PRIMARY_MOBILE) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+        Ok(meta) => {
+            protected(Path::new(PRIMARY_MOBILE))?;
+            if meta.len() > 24 * 1024 {
+                bail!("primary mobile record is too large");
+            }
+            let record: ApproverRecord = serde_json::from_slice(&fs::read(PRIMARY_MOBILE)?)?;
+            record.validate()?;
+            let (agent, _) = configs()?;
+            let (approval, denial) = record.keys()?;
+            if syn_protocol::verifying_key_from_pem(&fs::read_to_string(
+                agent.approval_public_key,
+            )?)? != approval
+                || syn_protocol::verifying_key_from_pem(&fs::read_to_string(
+                    agent.denial_public_key,
+                )?)? != denial
+                || fs::read_to_string(agent.client_ca_certificate)?.trim()
+                    != record.client_certificate_pem.trim()
+            {
+                bail!("primary mobile identities changed");
+            }
+            Ok(Some(record))
+        }
+    }
+}
+fn mobile_record(request: &crate::onboarding::OnboardingRequest) -> Result<ApproverRecord> {
+    let record = ApproverRecord {
+        schema_version: 1,
+        device_id: request
+            .approver_device_id
+            .clone()
+            .context("missing mobile device")?,
+        display_name: "iPhone".into(),
+        development: request.development_signer,
+        approval_public_x963_base64: request.approval_public_x963_base64.clone(),
+        denial_public_x963_base64: request.denial_public_x963_base64.clone(),
+        client_certificate_pem: String::from_utf8(
+            STANDARD.decode(&request.client_certificate_pem_base64)?,
+        )?,
+    };
+    record.validate()?;
+    let der = rustls::pki_types::CertificateDer::from(record.certificate_der()?);
+    rustls::server::ParsedCertificate::try_from(&der).context("invalid client certificate")?;
+    Ok(record)
+}
+pub(crate) fn record_mobile_primary(request: &crate::onboarding::OnboardingRequest) -> Result<()> {
+    let record = mobile_record(request)?;
+    if Path::new(PRIMARY_MOBILE).try_exists()? {
+        bail!("primary mobile identity already exists");
+    }
+    atomic_write(
+        Path::new(PRIMARY_MOBILE),
+        &serde_json::to_vec(&record)?,
+        0o600,
+    )
+}
+pub(crate) fn configure_mobile(request: &crate::onboarding::OnboardingRequest) -> Result<()> {
+    if request.approver_device_id.is_none() {
+        return Ok(());
+    }
+    crate::maintenance::validate_mobile_request(request)?;
+    let record = mobile_record(request)?;
+    if let Some(primary) = primary_mobile()? {
+        if primary.device_id == record.device_id {
+            if serde_json::to_vec(&primary)? != serde_json::to_vec(&record)? {
+                bail!("primary phone identities differ");
+            }
+            return Ok(());
+        }
+    }
+    let data = serde_json::to_vec(&record)?;
+    let path = Path::new("/var/lib/syn").join(format!("mobile-{}.incoming", record.device_id));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(&data)?;
+    file.sync_all()?;
+    drop(file);
+    let result = enroll(
+        &path,
+        &hex::encode(Sha256::digest(&data)),
+        request.development_signer,
+        true,
+    );
+    let _ = fs::remove_file(path);
+    result.map(|_| ())
+}
+pub(crate) fn enroll_mobile(device: &str, allow_development: bool) -> Result<()> {
+    let mut data = Vec::new();
+    std::io::stdin()
+        .take(24 * 1024 + 1)
+        .read_to_end(&mut data)?;
+    if data.len() > 24 * 1024 {
+        bail!("mobile enrollment is too large");
+    }
+    let record: ApproverRecord = serde_json::from_slice(&data)?;
+    record.validate()?;
+    if record.device_id != device || (record.development && !allow_development) {
+        bail!("mobile enrollment exceeds its authorization");
+    }
+    if let Some(primary) = primary_mobile()? {
+        if primary.device_id == device {
+            if serde_json::to_vec(&primary)? != serde_json::to_vec(&record)? {
+                bail!("primary mobile identity changed");
+            }
+            return print_profile(device);
+        }
+    }
+    let path = Path::new("/var/lib/syn").join(format!("mobile-{device}.incoming"));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(&data)?;
+    file.sync_all()?;
+    drop(file);
+    let result = enroll(
+        &path,
+        &hex::encode(Sha256::digest(&data)),
+        allow_development,
+        true,
+    );
+    let _ = fs::remove_file(path);
+    result?;
+    print_profile(device)
 }
 
 #[cfg(test)]

@@ -145,6 +145,29 @@ enum MaintenanceCommand {
         #[arg(long)]
         apply: bool,
     },
+    /// Retain a separate fixed-operation helper for one phone.
+    InstallMobile {
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        allow_development: bool,
+        #[arg(long)]
+        apply: bool,
+    },
+    ServeMobile {
+        #[arg(long)]
+        device_id: String,
+    },
+    RevokeMobile {
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        apply: bool,
+    },
     /// Serve the forced-command maintenance protocol.
     Serve,
     /// Remove only the exact maintenance key entry installed by Syn.
@@ -637,6 +660,7 @@ fn run(cli: &Cli) -> Result<()> {
                 }
                 verify_local_sudo_recovered(&arguments.state)?;
                 approvers::revoke_all_mobile_keys()?;
+                maintenance::revoke_all_mobile()?;
                 if Path::new("/var/lib/syn/maintenance/config.json").try_exists()? {
                     maintenance::revoke(true)?;
                 }
@@ -741,6 +765,26 @@ fn run(cli: &Cli) -> Result<()> {
                 public_key,
                 apply,
             } => output(cli.json, maintenance::install(user, public_key, *apply)?),
+            MaintenanceCommand::InstallMobile {
+                user,
+                device_id,
+                public_key,
+                allow_development,
+                apply,
+            } => output(
+                cli.json,
+                maintenance::install_mobile(
+                    user,
+                    device_id,
+                    public_key,
+                    *allow_development,
+                    *apply,
+                )?,
+            ),
+            MaintenanceCommand::ServeMobile { device_id } => maintenance::serve_mobile(device_id),
+            MaintenanceCommand::RevokeMobile { device_id, apply } => {
+                output(cli.json, maintenance::revoke_mobile(device_id, *apply)?)
+            }
             MaintenanceCommand::Serve => maintenance::serve(),
             MaintenanceCommand::Revoke { apply } => output(cli.json, maintenance::revoke(*apply)?),
         },

@@ -15,11 +15,14 @@ final class IOSModel: ObservableObject {
     @Published var enrollmentText = ""
     @Published var machineHost = ""
     @Published var machinePort = "22"
+    @Published var machineUser = "ferrerluis"
+    @Published private(set) var installing = false
     @Published private(set) var hostCandidate: MobileHostKey?
     @Published private(set) var bootstrapCommand: String?
     @Published private(set) var checkingHost = false
     private var checkedHost: String?
     private var checkedPort: Int?
+    private var checkedUser: String?
     private var approvedHostKey: String?
     let deviceID: String
     let developmentSigner: Bool
@@ -74,18 +77,19 @@ final class IOSModel: ObservableObject {
     }
 
     func checkHost() async {
-        guard !checkingHost else { return }
+        guard !checkingHost, !installing else { return }
         checkingHost = true
         // A failed check must not display a previous machine's trust context.
         hostCandidate = nil; bootstrapCommand = nil; approvedHostKey = nil
-        checkedHost = nil; checkedPort = nil
+        checkedHost = nil; checkedPort = nil; checkedUser = nil
         defer { checkingHost = false }
         do {
-            guard let port = Int(machinePort) else { throw SynProtocolError.invalid("Enter a valid SSH port.") }
+            guard let port = Int(machinePort), (1...65535).contains(port) else { throw SynProtocolError.invalid("Enter a valid SSH port.") }
             let hostname = machineHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            try SSHConnectionSettings(hostname: hostname, username: machineUser, port: UInt16(port), hostTrustSource: nil).validate()
             let client = try MobileSSH(host: hostname, port: port, hostKey: nil)
             let candidate = try await client.inspectHost()
-            checkedHost = hostname; checkedPort = port; hostCandidate = candidate
+            checkedHost = hostname; checkedPort = port; checkedUser = machineUser; hostCandidate = candidate
             approvedHostKey = nil; bootstrapCommand = nil
             let saved = UserDefaults.standard.string(forKey: "trustedSSH:\(hostname):\(port)")
             if saved == candidate.publicKey { await trustHost() }
@@ -95,7 +99,7 @@ final class IOSModel: ObservableObject {
 
     func trustHost() async {
         guard let candidate = hostCandidate, let host = checkedHost, let port = checkedPort,
-              machineHost.trimmingCharacters(in: .whitespacesAndNewlines) == host, Int(machinePort) == port else { return }
+              machineHost.trimmingCharacters(in: .whitespacesAndNewlines) == host, Int(machinePort) == port, checkedUser == machineUser else { return }
         UserDefaults.standard.set(candidate.publicKey, forKey: "trustedSSH:\(host):\(port)")
         approvedHostKey = candidate.publicKey
         await prepareEnrollment()
@@ -103,24 +107,31 @@ final class IOSModel: ObservableObject {
         do {
             let client = try MobileSSH(host: host, port: port, hostKey: candidate.publicKey)
             // Every interpolated field comes from a generated UUID or canonical Ed25519 public key.
-            bootstrapCommand = "/usr/bin/sudo /usr/bin/synctl approvers authorize --device-id \(deviceID) --public-key '\(client.publicKey)'"
+            bootstrapCommand = "/usr/bin/sudo /var/tmp/syn-bootstrap.mobile/synctl maintenance install-mobile --user \(machineUser) --device-id \(deviceID) --public-key '\(client.publicKey)'"
                 + (developmentSigner ? " --allow-development" : "") + " --apply"
         } catch { self.error = error.localizedDescription }
     }
 
     func connectMobile() async {
+        guard !installing else { return }
         guard let host = checkedHost, let port = checkedPort, let approvedHostKey,
               machineHost.trimmingCharacters(in: .whitespacesAndNewlines) == host, Int(machinePort) == port,
-              !enrollmentText.isEmpty else { error = "Check and verify the machine’s SSH identity first."; return }
+              checkedUser == machineUser, !enrollmentText.isEmpty else { error = "Check and verify the machine’s SSH identity first."; return }
+        installing = true
+        defer { installing = false }
         do {
             let client = try MobileSSH(host: host, port: port, hostKey: approvedHostKey)
-            let data = try await client.enroll(Data(enrollmentText.utf8))
-            profileText = String(decoding: data, as: UTF8.self)
-            importProfile()
+            let enrollment = try JSONDecoder().decode(IOSEnrollment.self, from: Data(enrollmentText.utf8))
+            try await MobileOnboarding.run(client: client, host: host, port: port, user: machineUser, device: deviceID,
+                development: developmentSigner, enrollment: enrollment, configure: { target in
+                    self.profileText = String(decoding: try JSONEncoder().encode(target), as: UTF8.self)
+                    guard self.importProfile() else { throw SynProtocolError.invalid("Could not save the paired machine.") }
+                }, progress: { self.status = $0 })
         } catch { self.error = "Setup could not complete: \(error.localizedDescription)" }
     }
 
-    func importProfile() {
+    @discardableResult
+    func importProfile() -> Bool {
         do {
             var target = try JSONDecoder().decode(TargetRecord.self, from: Data(profileText.utf8))
             guard !target.targetID.isEmpty, target.publicKey != nil,
@@ -144,7 +155,8 @@ final class IOSModel: ObservableObject {
             profileText = ""
             failures.remove(target.id)
             if foreground { connect(target) }
-        } catch { self.error = error.localizedDescription }
+            return true
+        } catch { self.error = error.localizedDescription; return false }
     }
 
     func setForeground(_ active: Bool) {
@@ -294,8 +306,8 @@ private extension Result where Success == WireMessage, Failure == Error {
     }
 }
 
-struct IOSEnrollment: Encodable {
-    let schemaVersion = 1
+struct IOSEnrollment: Codable {
+    var schemaVersion = 1
     let deviceID: String
     let displayName: String
     let development: Bool

@@ -5,6 +5,8 @@ import Security
 
 struct RemoteOnboardingRequest: Codable, Equatable, Sendable {
     let schemaVersion: UInt16
+    let approverDeviceID: String?
+    let developmentSigner: Bool?
     let operationID: String
     let releaseID: String
     let releaseCommit: String
@@ -24,6 +26,8 @@ struct RemoteOnboardingRequest: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
+        case approverDeviceID = "approver_device_id"
+        case developmentSigner = "development_signer"
         case operationID = "operation_id"
         case releaseID = "release_id"
         case releaseCommit = "release_commit"
@@ -69,6 +73,8 @@ struct RemoteOnboardingRequest: Codable, Equatable, Sendable {
         }
         return Self(
             schemaVersion: 1,
+            approverDeviceID: nil,
+            developmentSigner: nil,
             operationID: operation.hex,
             releaseID: source.releaseID,
             releaseCommit: source.commit,

@@ -6,9 +6,9 @@ out = File.join(root, 'native-build')
 FileUtils.mkdir_p(out)
 project = Xcodeproj::Project.new(File.join(out, 'SynMobileCore.xcodeproj'))
 target = project.new_target(:framework, 'SynMobileCore', :ios, '18.0')
-shared = %w[CBOR SynProtocol SafeDisplay DecisionBuilder KeyStore Transport TargetStore ReleaseIdentity]
+shared = %w[CBOR SynProtocol SafeDisplay DecisionBuilder KeyStore Transport TargetStore ReleaseIdentity RemoteSourceArtifact RemoteHelperArtifact BundledRemoteSource RemoteOnboardingRequest]
 paths = shared.map { |n| File.join(repo, 'macos/Sources/Syn', n + '.swift') }
-paths += %w[IOSModel IOSSigning MobileSSH IOSSSHMetadata IOSTransportIdentityStore].map { |n| File.join(repo, 'ios/Sources', n + '.swift') }
+paths += %w[IOSModel IOSSigning MobileSSH IOSSSHMetadata IOSTransportIdentityStore MobileOnboarding].map { |n| File.join(repo, 'ios/Sources', n + '.swift') }
 paths += %w[SynMobileService MobileReview].map { |n| File.join(root, 'native-core', n + '.swift') }
 # Hide implementation dependencies from the framework's public Swift module.
 # The Expo facade exposes only Foundation values; all package code is linked here.

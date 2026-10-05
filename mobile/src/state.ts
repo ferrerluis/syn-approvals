@@ -9,7 +9,7 @@ export interface Request {
 export interface State {
   schemaVersion: 1; deviceID: string; developmentSigner: boolean; releaseID: string;
   targets: { id: string; name: string; connected: boolean }[]; requests: Request[];
-  setup: { host: string; port: number; checking: boolean; fingerprint?: string; bootstrapCommand?: string };
+  setup: { host: string; port: number; user?: string; checking: boolean; fingerprint?: string; bootstrapCommand?: string };
   error?: string; status?: string;
 }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -24,7 +24,7 @@ export function parseState(json: string): State {
       || typeof value.developmentSigner !== 'boolean' || !Array.isArray(value.targets) || !Array.isArray(value.requests)
       || !record(value.setup) || !string(value.setup.host) || typeof value.setup.port !== 'number' || !Number.isInteger(value.setup.port)
       || value.setup.port < 1 || value.setup.port > 65535 || typeof value.setup.checking !== 'boolean'
-      || !optionalString(value.setup.fingerprint) || !optionalString(value.setup.bootstrapCommand)
+      || !optionalString(value.setup.user) || !optionalString(value.setup.fingerprint) || !optionalString(value.setup.bootstrapCommand)
       || !optionalString(value.error) || !optionalString(value.status)) {
     throw new Error('Invalid native state. Syn cannot review requests.');
   }

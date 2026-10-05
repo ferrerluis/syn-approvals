@@ -103,3 +103,14 @@ private func reviewRequest() -> VerifiedApprovalRequest {
     #expect(review.targetName == "pi")
     #expect(review.targetKeyFingerprint == nil)
 }
+
+@Test func mobileOnboardingRequestMatchesRustGolden() throws {
+    let url = try #require(Bundle.module.url(forResource: "mobile-onboarding-v1", withExtension: "json", subdirectory: "Fixtures"))
+    let data = try Data(contentsOf: url)
+    let request = try JSONDecoder().decode(RemoteOnboardingRequest.self, from: data)
+    #expect(request.approverDeviceID == "00000000-0000-4000-8000-000000000001")
+    #expect(request.developmentSigner == true)
+    let encoded = try JSONSerialization.jsonObject(with: request.encoded()) as! [String: Any]
+    let golden = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    #expect(NSDictionary(dictionary: encoded).isEqual(to: golden))
+}

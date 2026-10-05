@@ -65,6 +65,10 @@ const BUILD_DEPENDENCIES: &[&str] = &[
 #[serde(deny_unknown_fields)]
 pub struct OnboardingRequest {
     pub schema_version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver_device_id: Option<String>,
+    #[serde(default)]
+    pub development_signer: bool,
     pub operation_id: String,
     pub release_id: String,
     pub release_commit: String,
@@ -322,6 +326,7 @@ fn prepare_from(
     let request: OnboardingRequest =
         serde_json::from_slice(&request_bytes).context("onboarding request is not valid JSON")?;
     validate_request(&request, sudo_user, expected_source_sha256)?;
+    crate::maintenance::validate_mobile_request(&request)?;
     if helper.bootstrap_operation_id.as_deref() != Some(request.operation_id.as_str()) {
         bail!("bootstrap helper path does not match the onboarding operation");
     }
@@ -710,6 +715,7 @@ pub fn configure(operation_id: &str, apply: bool) -> Result<PairingReport> {
     )?;
     configure_identities(&request)?;
     configure_target(&request, journal.managed_uid)?;
+    crate::approvers::configure_mobile(&request)?;
     run_quiet(
         "/usr/bin/systemctl",
         &["enable", "--now", "syn-agent.service"],
@@ -1021,6 +1027,7 @@ fn load_protected_request(
     }
     let request: OnboardingRequest = serde_json::from_slice(&bytes)?;
     validate_request(&request, &journal.managed_user, &journal.source_sha256)?;
+    crate::maintenance::validate_mobile_request(&request)?;
     if request.operation_id != journal.operation_id {
         bail!("onboarding request operation differs from the journal");
     }
@@ -1567,9 +1574,22 @@ fn configure_identities(request: &OnboardingRequest) -> Result<()> {
     let approval_pem = verifying_key_to_pem(&approval)?;
     let denial_pem = verifying_key_to_pem(&denial)?;
     let client_certificate = STANDARD.decode(&request.client_certificate_pem_base64)?;
-    ensure_or_write_exact(Path::new(APPROVAL_PUBLIC), approval_pem.as_bytes(), 0o640)?;
-    ensure_or_write_exact(Path::new(DENIAL_PUBLIC), denial_pem.as_bytes(), 0o640)?;
-    ensure_or_write_exact(Path::new(CLIENT_CA), &client_certificate, 0o640)?;
+    let preserve_primary =
+        request.approver_device_id.is_some() && Path::new(APPROVAL_PUBLIC).try_exists()?;
+    if preserve_primary {
+        for path in [APPROVAL_PUBLIC, DENIAL_PUBLIC, CLIENT_CA] {
+            validate_root_file(Path::new(path), 64 * 1024)?;
+        }
+        verifying_key_from_pem(&fs::read_to_string(APPROVAL_PUBLIC)?)?;
+        verifying_key_from_pem(&fs::read_to_string(DENIAL_PUBLIC)?)?;
+    } else {
+        ensure_or_write_exact(Path::new(APPROVAL_PUBLIC), approval_pem.as_bytes(), 0o640)?;
+        ensure_or_write_exact(Path::new(DENIAL_PUBLIC), denial_pem.as_bytes(), 0o640)?;
+        ensure_or_write_exact(Path::new(CLIENT_CA), &client_certificate, 0o640)?;
+        if request.approver_device_id.is_some() {
+            crate::approvers::record_mobile_primary(request)?;
+        }
+    }
     if Path::new(TARGET_PRIVATE).exists() || Path::new(TARGET_PUBLIC).exists() {
         validate_root_file(Path::new(TARGET_PRIVATE), 64 * 1024)?;
         validate_root_file(Path::new(TARGET_PUBLIC), 64 * 1024)?;
@@ -1661,6 +1681,12 @@ fn configure_target(request: &OnboardingRequest, managed_uid: u32) -> Result<()>
                 .context("refusing to overwrite invalid existing approver configuration")
         }
     };
+    if prior_agent
+        .as_ref()
+        .is_some_and(|agent| agent.target_id != request.target_id)
+    {
+        bail!("refusing to replace an existing target identity");
+    }
     let prior_registry = prior_agent
         .as_ref()
         .and_then(|c| c.approver_registry.clone());
@@ -2159,7 +2185,19 @@ fn validate_request(
     {
         bail!("listen address must be a concrete unicast address");
     }
-    if request.client_identity_label != format!("Syn {} transport", request.target_id) {
+    let expected_label = match &request.approver_device_id {
+        Some(device) => {
+            crate::maintenance::validate_device(device)?;
+            format!("Syn iOS {device} transport")
+        }
+        None => {
+            if request.development_signer {
+                bail!("development signer requires an explicitly authorized phone");
+            }
+            format!("Syn {} transport", request.target_id)
+        }
+    };
+    if request.client_identity_label != expected_label {
         bail!("transport identity label does not match the target");
     }
     let approval = syn_protocol::verifying_key_from_sec1(
@@ -2488,6 +2526,8 @@ mod tests {
         let denial = syn_protocol::generate_signing_key();
         let request = OnboardingRequest {
             schema_version: 1,
+            approver_device_id: None,
+            development_signer: false,
             operation_id: "0123456789abcdef0123456789abcdef".into(),
             release_id: syn_protocol::release_id().into(),
             release_commit: syn_protocol::release_commit().into(),

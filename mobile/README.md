@@ -20,8 +20,10 @@ Generated `mobile/ios` and `mobile/android`, framework/build output and screensh
 The acceptance build embeds JavaScript and runs with Metro stopped. Remote JavaScript updates are disabled. Matching target/app release metadata is checked before bundling. Non-development metadata requires a clean checkout at the exact commit. Device compilation must use Release and real metadata; it cannot use the simulator signer or zero metadata:
 
 ```sh
-SYN_RELEASE_METADATA=/absolute/path/release.json npm run device:compile
+SYN_RELEASE_METADATA=/absolute/path/release.json SYN_SETUP_ARTIFACTS=/absolute/path/artifacts npm run device:compile
 ```
+
+Matching-release builds require a directory containing `remote-source.json`, its source archive, `remote-helper.json`, and its Linux ARM64 helper. The build verifies their release, hashes and sizes before embedding them.
 
 This regenerates the native workspace with the separate production app identity. Before returning to simulator work, rebuild the Debug native core and regenerate/preinstall the Debug Expo workspace.
 
@@ -60,3 +62,11 @@ The native review fixture at `macos/Tests/SynTests/Fixtures/mobile-review.json` 
 Use `agent-device install` when updating a simulator app that has a paired identity. The local install check preserved the public device UUID. Do not use `reinstall` for pairing/update acceptance without first proving that its data-reset behavior is acceptable.
 
 `flows/setup-context.yaml` extends the SSH setup check with a rejected hostname. It verifies that a failed check removes the previous fingerprint and bootstrap controls. Supply the same `HOST` and independently verified `FINGERPRINT` variables as the setup flow.
+
+## Phone-led setup and updates
+
+Enter the direct hostname, SSH port and Linux account. Independently verify the displayed SSH fingerprint. A trusted administrator verifies the matching release's ARM64 helper and stages it as root-owned `/var/tmp/syn-bootstrap.mobile/synctl` (directory 0700, helper 0500), then runs the displayed `maintenance install-mobile` command. Debug simulators additionally require the explicit development grant shown in that command.
+
+The phone key is restricted to its own enrollment/profile, three hash-bound uploads and the fixed installer/recovery phases. Uploads permanently drop root UID, GID and supplementary groups before user-directory writes. Updates preserve target and Mac identities; a fresh phone-first installation records the phone's primary identity. Review and approve the two signed setup requests in Syn. A failure after the protected transition triggers local sudo recovery.
+
+An administrator can revoke only a phone's setup authority with `synctl maintenance revoke-mobile --device-id PHONE_UUID --apply`; Mac setup access is retained. Revoking an enrolled additional approver with `synctl approvers revoke` also removes its setup authority. This implementation still requires isolated ARM64 installation/update/rollback and real-Pi acceptance; unit checks alone do not prove installation.

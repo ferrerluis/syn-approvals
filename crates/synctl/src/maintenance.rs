@@ -913,6 +913,647 @@ fn validate_hex(value: &str, length: usize, label: &str) -> Result<()> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InstalledRelease {
+    pub schema_version: u16,
+    pub release_id: String,
+    pub commit: String,
+}
+pub(crate) fn installed_metadata() -> Result<Option<InstalledRelease>> {
+    let path = Path::new("/usr/share/syn/release.json");
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    verify_protected_file(path, None, 16 * 1024)?;
+    let release: InstalledRelease = serde_json::from_slice(&fs::read(path)?)?;
+    validate_hex(&release.commit, 40, "installed commit")?;
+    if release.schema_version != 1
+        || release.release_id.len() != 14
+        || !release.release_id.bytes().all(|b| b.is_ascii_digit())
+    {
+        bail!("invalid installed release metadata");
+    }
+    Ok(Some(release))
+}
+// Mobile setup retains its own helper and account binding. It never replaces
+// the Mac's maintenance helper, configuration or authorized key.
+const MOBILE_ROOT: &str = "/var/lib/syn/maintenance/mobile";
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct MobileConfig {
+    device_id: String,
+    managed_gid: u32,
+    allow_development: bool,
+    binding: Config,
+}
+#[derive(Debug, Eq, PartialEq)]
+enum MobileRequest {
+    Enroll,
+    Profile,
+    Upload {
+        artifact: &'static str,
+        hash: String,
+        size: u64,
+    },
+    Maintenance(Request),
+}
+pub(crate) fn validate_device(device: &str) -> Result<()> {
+    if device.len() != 36
+        || device.bytes().enumerate().any(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b != b'-'
+            } else {
+                !b.is_ascii_hexdigit() || b.is_ascii_uppercase()
+            }
+        })
+    {
+        bail!("invalid mobile device identifier");
+    }
+    Ok(())
+}
+fn mobile_directory(device: &str) -> Result<PathBuf> {
+    validate_device(device)?;
+    Ok(Path::new(MOBILE_ROOT).join(device))
+}
+fn mobile_entry(device: &str, key: &str) -> Result<String> {
+    let retained = mobile_directory(device)?.join("synctl");
+    Ok(format!("restrict,no-user-rc,command=\"{} --json maintenance serve-mobile --device-id {device}\" {key} syn-mobile-maintenance-v1:{device}", retained.display()))
+}
+fn load_mobile(device: &str) -> Result<MobileConfig> {
+    let path = mobile_directory(device)?.join("config.json");
+    verify_protected_file(&path, Some(0o600), 64 * 1024)?;
+    let config: MobileConfig = serde_json::from_slice(&fs::read(&path)?)?;
+    let (uid, _) = account(&config.binding.managed_user)?;
+    if config.device_id != device
+        || config.binding.protocol != PROTOCOL
+        || uid == 0
+        || uid != config.binding.managed_uid
+        || account_gid(&config.binding.managed_user)? != config.managed_gid
+        || config.binding.authorized_keys_entry != mobile_entry(device, &config.binding.public_key)?
+    {
+        bail!("mobile maintenance account or identity changed");
+    }
+    validate_public_key(&config.binding.public_key)?;
+    Ok(config)
+}
+fn account_gid(user: &str) -> Result<u32> {
+    validate_user(user)?;
+    let output = Command::new("/usr/bin/id")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .args(["-g", user])
+        .output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        bail!("managed group is unavailable");
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().parse()?)
+}
+pub fn install_mobile(
+    user: &str,
+    device: &str,
+    key: &str,
+    allow_development: bool,
+    apply: bool,
+) -> Result<Report> {
+    validate_device(device)?;
+    validate_user(user)?;
+    let (uid, _) = account(user)?;
+    let gid = account_gid(user)?;
+    if uid == 0 || gid == 0 {
+        bail!("mobile setup requires a non-root account and group");
+    }
+    let key = validate_public_key(key)?;
+    let entry = mobile_entry(device, &key)?;
+    if apply {
+        require_root()?;
+        verify_sshd_and_root_shell()?;
+        verify_current_bootstrap()?;
+        ensure_root_parent(Path::new("/var/lib/syn"))?;
+        create_root_dir(Path::new(ROOT), 0o700)?;
+        create_root_dir(Path::new(MOBILE_ROOT), 0o700)?;
+        let dir = mobile_directory(device)?;
+        if !dir.try_exists()? && fs::read_dir(MOBILE_ROOT)?.count() >= 8 {
+            bail!("too many phone setup identities");
+        }
+        create_root_dir(&dir, 0o700)?;
+        let config = MobileConfig {
+            device_id: device.into(),
+            managed_gid: gid,
+            allow_development,
+            binding: Config {
+                protocol: PROTOCOL,
+                managed_user: user.into(),
+                managed_uid: uid,
+                public_key: key.clone(),
+                authorized_keys_entry: entry.clone(),
+            },
+        };
+        let config_path = dir.join("config.json");
+        let bytes = serde_json::to_vec(&config)?;
+        if config_path.try_exists()? {
+            load_mobile(device)?;
+            if fs::read(&config_path)? != bytes {
+                bail!("phone setup binding differs; revoke it explicitly first");
+            }
+        }
+        let retained = dir.join("synctl");
+        let source = fs::canonicalize(std::env::current_exe()?)?;
+        let size = fs::metadata(&source)?.len();
+        let hash = hash_file(&source, MAX_HELPER)?;
+        if retained.try_exists()? {
+            verify_protected_file(&retained, Some(0o500), MAX_HELPER)?;
+            if hash_file(&retained, MAX_HELPER)? != hash {
+                bail!("phone retained helper differs; refusing replacement");
+            }
+        } else {
+            copy_and_hash(File::open(source)?, &retained, size, &hash)?;
+        }
+        if !config_path.try_exists()? {
+            atomic_write(&config_path, &bytes, 0o600)?;
+        }
+        create_root_dir(Path::new("/root/.ssh"), 0o700)?;
+        let mut text = if Path::new(AUTHORIZED_KEYS).try_exists()? {
+            verify_authorized_keys_file(Path::new(AUTHORIZED_KEYS))?;
+            fs::read_to_string(AUTHORIZED_KEYS)?
+        } else {
+            String::new()
+        };
+        if let Some(append) = mobile_entry_append(&text, &entry, device, &key)? {
+            text.push_str(&append);
+            atomic_write(Path::new(AUTHORIZED_KEYS), text.as_bytes(), 0o600)?;
+        }
+    }
+    Ok(Report {
+        protocol: PROTOCOL,
+        managed_user: user.into(),
+        action: "install-mobile",
+        applied: apply,
+    })
+}
+fn mobile_entry_append(text: &str, entry: &str, device: &str, key: &str) -> Result<Option<String>> {
+    let tag = format!("syn-mobile-maintenance-v1:{device}");
+    let existing: Vec<_> = text.lines().filter(|line| line.ends_with(&tag)).collect();
+    if existing.len() > 1
+        || existing.iter().any(|line| *line != entry)
+        || text
+            .lines()
+            .any(|line| line.contains(&format!(" {key} ")) && line != entry)
+    {
+        bail!("phone maintenance key or tagged entry conflicts with existing SSH authorization");
+    }
+    if existing.len() == 1 {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{}{}\n",
+        if text.is_empty() || text.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        },
+        entry
+    )))
+}
+fn parse_mobile(value: &str) -> Result<MobileRequest> {
+    if value.len() > 512 {
+        bail!("mobile command is too large");
+    }
+    let words: Vec<_> = value.split(' ').collect();
+    match words.as_slice() {
+        ["syn-mobile", VERSION_FLAG, "1", "enroll"] => Ok(MobileRequest::Enroll),
+        ["syn-mobile", VERSION_FLAG, "1", "profile"] => Ok(MobileRequest::Profile),
+        ["syn-mobile", VERSION_FLAG, "1", "upload", artifact, hash, size] => {
+            let (artifact, maximum) = match *artifact {
+                "source" => ("source", 2 * 1024 * 1024 * 1024),
+                "helper" => ("helper", MAX_HELPER),
+                "request" => ("request", 64 * 1024),
+                _ => bail!("unsupported phone setup artifact"),
+            };
+            validate_hex(hash, 64, "artifact hash")?;
+            let size: u64 = size.parse()?;
+            if size == 0 || size > maximum {
+                bail!("artifact size is outside the supported range");
+            }
+            Ok(MobileRequest::Upload {
+                artifact,
+                hash: (*hash).into(),
+                size,
+            })
+        }
+        ["syn-mobile", rest @ ..] => Ok(MobileRequest::Maintenance(parse_original(&format!(
+            "syn-maintenance {}",
+            rest.join(" ")
+        ))?)),
+        _ => bail!("unauthorized phone maintenance command"),
+    }
+}
+pub(crate) fn validate_mobile_request(
+    request: &crate::onboarding::OnboardingRequest,
+) -> Result<()> {
+    let Some(device) = &request.approver_device_id else {
+        return Ok(());
+    };
+    let config = load_mobile(device)?;
+    validate_mobile_binding(request, &config)
+}
+fn validate_mobile_binding(
+    request: &crate::onboarding::OnboardingRequest,
+    config: &MobileConfig,
+) -> Result<()> {
+    if request.approver_device_id.as_deref() != Some(config.device_id.as_str())
+        || request.managed_user != config.binding.managed_user
+        || (request.development_signer && !config.allow_development)
+    {
+        bail!("phone operation exceeds its device, account or development-signer authorization");
+    }
+    Ok(())
+}
+fn verify_mobile_operation(
+    config: &MobileConfig,
+    operation: &str,
+    incoming: Option<&str>,
+) -> Result<()> {
+    validate_hex(operation, 32, "operation ID")?;
+    let bytes = if let Some(hash) = incoming {
+        let (_, home) = account(&config.binding.managed_user)?;
+        let path = home
+            .join(crate::onboarding::INCOMING_DIRECTORY)
+            .join(crate::onboarding::REQUEST_NAME);
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.len() == 0 || meta.len() > 64 * 1024 {
+            bail!("setup request is too large");
+        }
+        let mut file = open_user_file(&path, config.binding.managed_uid, meta.len())?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        if hex::encode(Sha256::digest(&bytes)) != hash {
+            bail!("setup request hash changed");
+        }
+        bytes
+    } else {
+        let path = Path::new(crate::onboarding::STAGING_ROOT)
+            .join(operation)
+            .join("request.json");
+        verify_protected_file(&path, Some(0o600), 64 * 1024)?;
+        fs::read(path)?
+    };
+    let request: crate::onboarding::OnboardingRequest = serde_json::from_slice(&bytes)?;
+    if request.operation_id != operation {
+        bail!("setup operation changed");
+    }
+    validate_mobile_binding(&request, config)
+}
+pub fn serve_mobile(device: &str) -> Result<()> {
+    require_root()?;
+    let config = load_mobile(device)?;
+    let retained = mobile_directory(device)?.join("synctl");
+    verify_protected_file(&retained, Some(0o500), MAX_HELPER)?;
+    let original =
+        std::env::var("SSH_ORIGINAL_COMMAND").context("forced phone command required")?;
+    match parse_mobile(&original)? {
+        MobileRequest::Enroll => crate::approvers::enroll_mobile(device, config.allow_development),
+        MobileRequest::Profile => crate::approvers::print_profile(device),
+        MobileRequest::Upload {
+            artifact,
+            hash,
+            size,
+        } => receive_mobile(&config, artifact, &hash, size),
+        MobileRequest::Maintenance(Request::Probe) => {
+            let output = Command::new("/usr/sbin/ip")
+                .env_clear()
+                .env("PATH", "/usr/sbin:/usr/bin:/bin")
+                .args(["-j", "address", "show"])
+                .output()?;
+            if !output.status.success() || !output.stderr.is_empty() {
+                bail!("machine addresses are unavailable");
+            }
+            let addresses: Vec<_> = crate::interface_addresses(&output.stdout)?
+                .into_iter()
+                .map(|(_, ip)| ip)
+                .filter(|ip| !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast())
+                .collect();
+            let target_id = if Path::new(syn_config::DEFAULT_AGENT_CONFIG).try_exists()? {
+                Some(syn_config::AgentConfig::load(syn_config::DEFAULT_AGENT_CONFIG)?.target_id)
+            } else {
+                None
+            };
+            let installed = installed_metadata()?;
+            println!(
+                "{}",
+                serde_json::json!({"ok":true,"data":{"protocol_version":1,"managed_user":config.binding.managed_user,
+                "device_id":device,"allow_development":config.allow_development,"listen_ips":addresses,"target_id":target_id,"installed_release_id":installed.as_ref().map(|v| &v.release_id),"installed_release_commit":installed.as_ref().map(|v| &v.commit)}})
+            );
+            Ok(())
+        }
+        MobileRequest::Maintenance(Request::Retain {
+            operation,
+            hash,
+            size,
+        }) => retain_incoming(&config.binding, &operation, &hash, size),
+        MobileRequest::Maintenance(Request::Prepare {
+            operation,
+            request_hash,
+            source_hash,
+        }) => {
+            verify_mobile_operation(&config, &operation, Some(&request_hash))?;
+            run_helper(
+                &config.binding,
+                &operation,
+                &[
+                    "--json",
+                    "onboard",
+                    "prepare",
+                    "--request-sha256",
+                    &request_hash,
+                    "--source-sha256",
+                    &source_hash,
+                    "--apply",
+                ],
+            )
+        }
+        MobileRequest::Maintenance(Request::Phase { name, operation }) => {
+            verify_mobile_operation(&config, &operation, None)?;
+            run_helper(
+                &config.binding,
+                &operation,
+                &[
+                    "--json",
+                    "onboard",
+                    name,
+                    "--operation-id",
+                    &operation,
+                    "--apply",
+                ],
+            )
+        }
+        MobileRequest::Maintenance(Request::Recover) => run_clean(
+            &retained,
+            &config.binding,
+            &["--json", "recover", "--restore-local-sudo", "--apply"],
+        ),
+    }
+}
+#[cfg(target_os = "linux")]
+fn receive_mobile(config: &MobileConfig, artifact: &str, hash: &str, size: u64) -> Result<()> {
+    let (_, home) = account(&config.binding.managed_user)?;
+    // No elevated identity may touch the user's upload directory. This is the
+    // end of one forced SSH request, so privileges are dropped permanently.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        if libc::setgroups(0, std::ptr::null()) != 0
+            || libc::setgid(config.managed_gid) != 0
+            || libc::setuid(config.binding.managed_uid) != 0
+        {
+            bail!("unable to drop phone upload privileges");
+        }
+        if libc::getuid() != config.binding.managed_uid
+            || libc::geteuid() != config.binding.managed_uid
+            || libc::getgid() != config.managed_gid
+            || libc::getegid() != config.managed_gid
+            || libc::getgroups(0, std::ptr::null_mut()) != 0
+        {
+            bail!("phone upload retained root identity");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let directory = home.join(crate::onboarding::INCOMING_DIRECTORY);
+        for path in [&home, &home.join(".cache"), &directory] {
+            if !path.try_exists()? {
+                fs::create_dir(path)?;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            }
+            let meta = fs::symlink_metadata(path)?;
+            if !meta.is_dir()
+                || meta.uid() != config.binding.managed_uid
+                || meta.mode() & 0o022 != 0
+            {
+                bail!("unsafe phone upload directory");
+            }
+        }
+        receive_checked(&directory, artifact, hash, size, std::io::stdin().lock())?;
+        println!(
+            "{}",
+            serde_json::json!({"ok":true,"data":{"artifact":artifact,"size_bytes":size,"sha256":hash}})
+        );
+        Ok(())
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn receive_mobile(_config: &MobileConfig, _artifact: &str, _hash: &str, _size: u64) -> Result<()> {
+    bail!("phone setup uploads require Linux")
+}
+#[cfg(any(target_os = "linux", test))]
+fn receive_checked(
+    directory: &Path,
+    artifact: &str,
+    hash: &str,
+    size: u64,
+    input: impl Read,
+) -> Result<()> {
+    let name = match artifact {
+        "source" => "source.incoming",
+        "helper" => "synctl-bootstrap.incoming",
+        "request" => "request.incoming",
+        _ => bail!("unsupported upload"),
+    };
+    let destination = directory.join(name);
+    let temporary = directory.join(format!(".{name}.{}", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&temporary)?;
+        let mut input = input.take(size + 1);
+        let mut hasher = Sha256::new();
+        let mut count = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let n = input.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            count += n as u64;
+            if count > size {
+                bail!("upload exceeds its exact size");
+            }
+            hasher.update(&buffer[..n]);
+            file.write_all(&buffer[..n])?;
+        }
+        if count != size || hex::encode(hasher.finalize()) != hash {
+            bail!("upload does not match trusted bytes");
+        }
+        file.sync_all()?;
+        if fs::symlink_metadata(&destination).is_ok_and(|m| !m.is_file() || m.nlink() != 1) {
+            bail!("unsafe existing upload");
+        }
+        fs::rename(&temporary, &destination)?;
+        File::open(directory)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
+}
+pub fn revoke_mobile(device: &str, apply: bool) -> Result<Report> {
+    require_root()?;
+    let config = load_mobile(device)?;
+    if apply {
+        remove_exact_authorized_entry(&config.binding.authorized_keys_entry)?;
+        let dir = mobile_directory(device)?;
+        fs::remove_file(dir.join("config.json"))?;
+        fs::remove_file(dir.join("synctl"))?;
+        fs::remove_dir(dir)?;
+        File::open(MOBILE_ROOT)?.sync_all()?;
+    }
+    Ok(Report {
+        protocol: PROTOCOL,
+        managed_user: config.binding.managed_user,
+        action: "revoke-mobile",
+        applied: apply,
+    })
+}
+pub(crate) fn revoke_mobile_if_present(device: &str) -> Result<()> {
+    if mobile_directory(device)?.join("config.json").try_exists()? {
+        revoke_mobile(device, true)?;
+    }
+    Ok(())
+}
+pub fn revoke_all_mobile() -> Result<()> {
+    if !Path::new(MOBILE_ROOT).try_exists()? {
+        return Ok(());
+    }
+    verify_root_directory(Path::new(MOBILE_ROOT))?;
+    for entry in fs::read_dir(MOBILE_ROOT)? {
+        let device = entry?
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("invalid phone directory"))?;
+        revoke_mobile(&device, true)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod mobile_tests {
+    use super::*;
+    const DEVICE: &str = "00000000-0000-4000-8000-000000000001";
+    #[test]
+    fn mobile_golden_and_account_device_development_binding() {
+        let bytes =
+            include_str!("../../../macos/Tests/SynTests/Fixtures/mobile-onboarding-v1.json");
+        let request: crate::onboarding::OnboardingRequest = serde_json::from_str(bytes).unwrap();
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::from_str::<serde_json::Value>(bytes).unwrap()
+        );
+        let mut config = MobileConfig {
+            device_id: DEVICE.into(),
+            managed_gid: 1000,
+            allow_development: true,
+            binding: Config {
+                protocol: 1,
+                managed_user: "developer".into(),
+                managed_uid: 1000,
+                public_key: String::new(),
+                authorized_keys_entry: String::new(),
+            },
+        };
+        validate_mobile_binding(&request, &config).unwrap();
+        config.allow_development = false;
+        assert!(validate_mobile_binding(&request, &config).is_err());
+        config.allow_development = true;
+        config.device_id = "00000000-0000-4000-8000-000000000002".into();
+        assert!(validate_mobile_binding(&request, &config).is_err());
+        config.device_id = DEVICE.into();
+        config.binding.managed_user = "other-user".into();
+        assert!(validate_mobile_binding(&request, &config).is_err());
+        let mut value: serde_json::Value = serde_json::from_str(bytes).unwrap();
+        value["executor"] = serde_json::json!("unauthorized");
+        assert!(serde_json::from_value::<crate::onboarding::OnboardingRequest>(value).is_err());
+    }
+    #[test]
+    fn mobile_protocol_rejects_executors_paths_versions_and_bad_sizes() {
+        assert_eq!(
+            parse_mobile("syn-mobile --protocol-version 1 probe").unwrap(),
+            MobileRequest::Maintenance(Request::Probe)
+        );
+        for invalid in [
+            "syn-mobile --protocol-version 2 probe",
+            "syn-mobile --protocol-version 1 exec true",
+            "syn-mobile --protocol-version 1 recover;id",
+            "syn-mobile  --protocol-version 1 profile",
+            "syn-mobile --protocol-version 1 upload ../../etc/passwd x 2",
+        ] {
+            assert!(parse_mobile(invalid).is_err(), "{invalid}");
+        }
+        let hash = "a".repeat(64);
+        assert!(parse_mobile(&format!(
+            "syn-mobile --protocol-version 1 upload helper {hash} 0"
+        ))
+        .is_err());
+        assert!(parse_mobile(&format!(
+            "syn-mobile --protocol-version 1 upload request {hash} 65537"
+        ))
+        .is_err());
+        assert!(validate_device(DEVICE).is_ok());
+        assert!(validate_device("00000000-0000-4000-8000-00000000000/").is_err());
+    }
+    #[test]
+    fn phone_key_append_and_revoke_preserve_other_authorizations() {
+        let key = "ssh-ed25519 public-test-only";
+        let entry = mobile_entry(DEVICE, key).unwrap();
+        let existing = "unrelated administrator key\nMac restricted key syn-maintenance-v1\n";
+        let addition = mobile_entry_append(existing, &entry, DEVICE, key)
+            .unwrap()
+            .unwrap();
+        let updated = format!("{existing}{addition}");
+        assert!(mobile_entry_append(&updated, &entry, DEVICE, key)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            without_exact_authorized_entry(&updated, &entry).unwrap(),
+            existing
+        );
+        assert!(mobile_entry_append(
+            &format!("restrict {key} another-phone\n"),
+            &entry,
+            DEVICE,
+            key
+        )
+        .is_err());
+    }
+    #[test]
+    fn upload_rejects_partial_grown_changed_and_symlink_bytes_atomically() {
+        use std::os::unix::fs::symlink;
+        let dir = std::env::temp_dir().join(format!("syn-mobile-upload-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let bytes = b"public test artifact";
+        let hash = hex::encode(Sha256::digest(bytes));
+        receive_checked(&dir, "source", &hash, bytes.len() as u64, &bytes[..]).unwrap();
+        let destination = dir.join("source.incoming");
+        for (size, data, digest) in [
+            (bytes.len() as u64, &bytes[..3], hash.clone()),
+            (3, &bytes[..], hash.clone()),
+            (bytes.len() as u64, &bytes[..], "0".repeat(64)),
+        ] {
+            assert!(receive_checked(&dir, "source", &digest, size, data).is_err());
+            assert_eq!(fs::read(&destination).unwrap(), bytes);
+        }
+        fs::remove_file(&destination).unwrap();
+        let outside = dir.join("outside");
+        fs::write(&outside, b"retained").unwrap();
+        symlink(&outside, &destination).unwrap();
+        assert!(receive_checked(&dir, "source", &hash, bytes.len() as u64, &bytes[..]).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"retained");
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

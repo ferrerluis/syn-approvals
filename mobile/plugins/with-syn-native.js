@@ -21,6 +21,16 @@ module.exports = function withSynNative(config) {
     fs.mkdirSync(path.dirname(location), { recursive: true });
     fs.copyFileSync(path.join(c.modRequest.projectRoot, '../ios/Support/release.json'), location);
     IOSConfig.XcodeUtils.addResourceFileToGroup({ filepath: file, groupName: 'Syn', isBuildFile: true, project });
+    const setupResources = path.join(c.modRequest.projectRoot, 'artifacts/setup-resources');
+    if (fs.existsSync(setupResources)) {
+      for (const name of fs.readdirSync(setupResources)) {
+        const relative = `Syn/setup/${name}`;
+        const destination = path.join(c.modRequest.platformProjectRoot, relative);
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        fs.copyFileSync(path.join(setupResources, name), destination);
+        IOSConfig.XcodeUtils.addResourceFileToGroup({ filepath: relative, groupName: 'Syn', isBuildFile: true, project });
+      }
+    }
     return c;
   });
   return withAppDelegate(config, c => {

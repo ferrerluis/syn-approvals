@@ -1,0 +1,21 @@
+{
+  "approval_public_x963_base64": "BAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+  "approver_device_id": "00000000-0000-4000-8000-000000000001",
+  "client_certificate_pem_base64": "cHVibGljIHRlc3QgY2VydGlmaWNhdGU=",
+  "client_identity_label": "Syn iOS 00000000-0000-4000-8000-000000000001 transport",
+  "denial_public_x963_base64": "BAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+  "development_signer": true,
+  "display_name": "Test machine",
+  "helper_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "helper_size_bytes": 456,
+  "hostname": "remote.example",
+  "listen_ip": "192.168.2.10",
+  "managed_user": "developer",
+  "operation_id": "0123456789abcdef0123456789abcdef",
+  "release_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release_id": "20260906190000",
+  "schema_version": 1,
+  "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_size_bytes": 123,
+  "target_id": "remote_machine"
+}

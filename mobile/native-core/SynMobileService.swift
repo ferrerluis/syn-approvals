@@ -34,8 +34,8 @@ public final class SynMobileService {
 
     public func setActive(_ active: Bool) { model.setForeground(active) }
     public func retry() { model.error = nil; model.retry() }
-    public func checkHost(_ host: String, port: Int) async {
-        model.error = nil; model.machineHost = host; model.machinePort = String(port)
+    public func checkHost(_ host: String, port: Int, user: String) async {
+        model.error = nil; model.machineHost = host; model.machinePort = String(port); model.machineUser = user
         await model.checkHost()
     }
     public func trustHost() async { await model.trustHost() }
@@ -65,7 +65,7 @@ public final class SynMobileService {
         let state = MobileState(schemaVersion: 1, deviceID: model.deviceID,
             developmentSigner: model.developmentSigner, releaseID: ReleaseIdentity.current.releaseID,
             targets: targets, requests: requests,
-            setup: MobileSetup(host: model.machineHost, port: Int(model.machinePort) ?? 22,
+            setup: MobileSetup(host: model.machineHost, port: Int(model.machinePort) ?? 22, user: model.machineUser,
                 checking: model.checkingHost, fingerprint: model.hostCandidate?.fingerprint,
                 bootstrapCommand: model.bootstrapCommand), error: model.error, status: model.status)
         return String(decoding: try JSONEncoder().encode(state), as: UTF8.self)
@@ -85,5 +85,5 @@ private struct MobileState: Encodable {
 }
 private struct MobileTarget: Encodable { let id: String; let name: String; let connected: Bool }
 private struct MobileSetup: Encodable {
-    let host: String; let port: Int; let checking: Bool; let fingerprint: String?; let bootstrapCommand: String?
+    let host: String; let port: Int; let user: String; let checking: Bool; let fingerprint: String?; let bootstrapCommand: String?
 }
