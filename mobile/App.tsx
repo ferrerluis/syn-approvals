@@ -33,6 +33,7 @@ export default function App() {
     try { await operation(); try { setState(await readState()); } catch (error) { setState(undefined); throw error; } } catch { setError('Syn could not complete that action. Check the connection and retry.'); }
     finally { setWorking(false); }
   };
+  const setupMatches = state?.setup.host.trim() === host.trim() && state.setup.port === Number(port);
   return <SafeAreaView style={styles.safe}><StatusBar style="dark" /><ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
     <View style={styles.heading}><View><Text style={styles.title}>Syn</Text><Text style={styles.subtitle}>Review remote approvals</Text></View><Button testID="add-machine" label={setup ? 'Done' : 'Add a machine'} onPress={() => setSetup(!setup)} /></View>
     {state?.developmentSigner && <View style={styles.notice}><Text style={styles.bold}>Simulator development signer</Text><Text style={styles.secondary}>Hardware authentication is not tested here.</Text></View>}
@@ -42,15 +43,15 @@ export default function App() {
       <TextInput accessibilityLabel="Machine hostname" testID="machine-host" value={host} onChangeText={setHost} placeholder="Machine hostname" autoCapitalize="none" autoCorrect={false} style={styles.input} />
       <TextInput accessibilityLabel="SSH port" testID="machine-port" value={port} onChangeText={setPort} keyboardType="number-pad" style={styles.input} />
       <Button testID="check-host" label="Check machine" disabled={busy || !host || !/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535} onPress={() => void action(() => native!.checkHost(host, Number(port)))} />
-      {state?.setup.fingerprint && <><Text style={styles.bold}>Verify SSH fingerprint</Text><Text selectable style={styles.mono} testID="host-fingerprint">{state.setup.fingerprint}</Text><Text style={styles.secondary}>Compare this with a trusted administrator session before continuing.</Text><Button testID="trust-host" label="Trust verified machine" disabled={busy} onPress={() => void action(() => native!.trustHost())} /></>}
-      {state?.setup.bootstrapCommand && <><Text style={styles.secondary}>Run this once in a trusted administrator terminal, then continue.</Text><Text selectable style={styles.mono}>{state.setup.bootstrapCommand}</Text><Button testID="pair-machine" label="I’ve run the command — continue" disabled={busy} onPress={() => void action(() => native!.pair())} /></>}
+      {setupMatches && state?.setup.fingerprint && <><Text style={styles.bold}>Verify SSH fingerprint</Text><Text selectable style={styles.mono} testID="host-fingerprint">{state.setup.fingerprint}</Text><Text style={styles.secondary}>Compare this with a trusted administrator session before continuing.</Text><Button testID="trust-host" label="Trust verified machine" disabled={busy} onPress={() => void action(() => native!.trustHost())} /></>}
+      {setupMatches && state?.setup.bootstrapCommand && <><Text style={styles.secondary}>Run this once in a trusted administrator terminal, then continue.</Text><Text selectable style={styles.mono}>{state.setup.bootstrapCommand}</Text><Button testID="pair-machine" label="I’ve run the command — continue" disabled={busy} onPress={() => void action(() => native!.pair())} /></>}
     </View>}
     <Text style={styles.section}>Machines</Text>
     {!state?.targets.length && <Text style={styles.secondary}>Add a machine to receive approval requests.</Text>}
     {state?.targets.map(target => <View key={target.id} style={styles.card}><View style={styles.row}><Text style={styles.bold}>{target.name}</Text><Text testID={`connection-${target.id}`} style={target.connected ? styles.connected : styles.secondary}>{target.connected ? 'Connected' : 'Disconnected'}</Text></View></View>)}
     {native && <Button testID="retry" label="Retry connection" disabled={busy} onPress={() => void action(() => native!.retry())} />}
     <Text style={styles.section}>Requests</Text>
-    {!state?.requests.length && <Text testID="empty-requests" style={styles.secondary}>No pending requests</Text>}
+    {!state?.requests.length && <Text testID="empty-requests" style={styles.secondary}>{state ? 'No pending requests' : 'Requests unavailable'}</Text>}
     {state?.requests.map(request => <View key={request.id} testID={`request-${request.id}`} style={styles.card}>
       <Text style={styles.bold}>{request.targetName}</Text>
       <Text style={styles.secondary}>Machine ID</Text><Text selectable style={styles.mono}>{request.targetID}</Text>

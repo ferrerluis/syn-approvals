@@ -106,3 +106,21 @@ test('A native storage error removes stale approval controls', async () => {
   expect(native!.approve).not.toHaveBeenCalled();
   ui.unmount();
 });
+
+test('Changing the hostname hides stale fingerprint trust and enrollment controls', async () => {
+  const checked = state(); checked.setup.host = 'trusted.example';
+  checked.setup.fingerprint = 'SHA256:independently-verified';
+  checked.setup.bootstrapCommand = 'Trusted administrator bootstrap';
+  jest.mocked(readState).mockResolvedValue(checked);
+  const ui = render(<App />);
+  await ui.findByText('Connected');
+  fireEvent.press(ui.getByTestId('add-machine'));
+  fireEvent.changeText(ui.getByTestId('machine-host'), 'trusted.example');
+  expect(ui.getByTestId('trust-host')).toBeTruthy();
+  expect(ui.getByTestId('pair-machine')).toBeTruthy();
+  fireEvent.changeText(ui.getByTestId('machine-host'), 'another.example');
+  expect(ui.queryByTestId('trust-host')).toBeNull();
+  expect(ui.queryByTestId('pair-machine')).toBeNull();
+  expect(native!.pair).not.toHaveBeenCalled();
+  ui.unmount();
+});

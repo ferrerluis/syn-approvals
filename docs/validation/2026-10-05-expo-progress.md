@@ -19,7 +19,7 @@ This is an incomplete local candidate on `codex/ios-approver`, in the existing i
 | Expo lint | `npm run lint` passes |
 | TypeScript | `npm run typecheck` |
 | Typed state tests | 5 passed, including malformed identities/digests/argument order and unknown machine rejection |
-| React Native UI tests | 8 passed; ID-only approval, expiry, denial during authentication, lifecycle disconnect, approval while setup waits, complete review fields, stale-state removal |
+| React Native UI tests | 9 passed; ID-only approval, expiry, denial during authentication, lifecycle disconnect, approval while setup waits, complete review fields, stale-state removal, changed-host setup binding |
 | Expo Doctor | 21/21 passed |
 | Standalone simulator build | Xcode 26.6 / iOS 26.5, embedded release JavaScript, Metro absent on port 8081 |
 | Native iOS tests | 19 passed in the iPhone 17 Pro simulator, including display privacy/reveal and foreign-machine rejection |
@@ -37,7 +37,7 @@ Detailed local logs are under `/private/tmp/syn-expo-*` and `mobile/artifacts/`.
 
 Phone-first installation, matching-release updates and rollback are not implemented yet. Automatic approval review rejected the proposed root installer/forced SSH endpoint change as too broad without specific approval; a separate, bounded scope was presented for approval. No edits from that rejected call were applied. The Mac maintenance key and recovery route remain untouched.
 
-The real Pi runs its prior release and does not yet have mobile enrollment commands. A matching candidate must be installed only after isolated Ubuntu ARM64 testing with independent recovery access. Required real-Pi proof remains: Connected, signed pending request, Approve, the original `/usr/bin/sudo -n /usr/bin/true` exits zero, a fresh repeat needs approval, and Mac pairing still works. Live race/failure checks are still pending. The unsigned production Expo app compiled successfully at candidate `1e5766814011f6261627a26d08e2ff7d34993425`, with embedded JavaScript, a Secure Enclave symbol, and no simulator signer in its native framework. The subsequent review changes need a fresh app build.
+The real Pi runs its prior release and does not yet have mobile enrollment commands. A matching candidate must be installed only after isolated Ubuntu ARM64 testing with independent recovery access. Required real-Pi proof remains: Connected, signed pending request, Approve, the original `/usr/bin/sudo -n /usr/bin/true` exits zero, a fresh repeat needs approval, and Mac pairing still works. Live race/failure checks are still pending. The unsigned production Expo app compiled successfully at candidate `1e5766814011f6261627a26d08e2ff7d34993425`, with embedded JavaScript, a Secure Enclave symbol, and no simulator signer in its native framework. Subsequent review checkpoint builds are recorded separately with their exact source commit in local evidence.
 
 An isolated Ubuntu 26.04 ARM64 QEMU guest is running with independently verified root SSH recovery under `/private/tmp/syn-expo-arm64-vm`, using an official checksum-verified cloud image. It is separate from the Pi and uses a disposable SSH identity. Recovery checks confirm `aarch64`, Ubuntu `26.04`, root UID `0` and active SSH. The default sudo is sudo-rs and sudo.ws is also installed; the existing alternate-provider audit must be preserved during installation. Its image SHA256 is `63a93bd5a8d76e33b15ceb5daa3657bd79be804748051ab178e643b0f5da22e7`.
 
