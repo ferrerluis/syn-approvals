@@ -143,15 +143,17 @@ fn validate_staged_security_state(user: &str, uid: Option<u32>) -> Result<()> {
     {
         bail!("requested, plug-in, and policy managed identities differ");
     }
-    let approval =
-        syn_protocol::verifying_key_from_pem(&fs::read_to_string(&plugin.approval_public_key)?)?;
-    let expected_key_id = syn_protocol::key_id_hex(&approval);
     let preflight: serde_json::Value = serde_json::from_slice(&fs::read(PREFLIGHT_MARKER)?)?;
     let pairing: serde_json::Value = serde_json::from_slice(&fs::read(PAIRING_MARKER)?)?;
     if preflight != pairing
         || preflight["schema_version"] != 1
         || preflight["target_id"] != plugin.target_id
-        || preflight["approver_key_id"] != expected_key_id
+        || !crate::preflight::trusted_approval_key_id(
+            &plugin,
+            preflight["approver_key_id"]
+                .as_str()
+                .context("preflight approver key ID missing")?,
+        )?
         || preflight["test_executable"] != "/usr/bin/true"
     {
         bail!("pairing and signed preflight evidence do not match current keys");

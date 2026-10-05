@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use socket2::{Domain, SockAddr, Socket, Type};
-use syn_config::{PluginConfig, Policy};
+use syn_config::{approvers::ApproverRegistry, PluginConfig, Policy};
 use syn_protocol::message_kind;
 use syn_protocol::{
     digest_environment, key_id_hex, sign_request, sorted_environment_names, verify_decision,
@@ -129,13 +129,22 @@ pub fn test_approval(config_path: &Path, record_preflight: bool) -> Result<Appro
         .with_context(|| format!("connect to {}", config.agent_socket.display()))?;
     write_frame(&mut stream, &wire, deadline)?;
     let response = WireMessageV1::decode(&read_frame(&mut stream, deadline)?)?;
-    let approval = validate_response(
+    let registry = config
+        .approver_registry
+        .as_deref()
+        .map(ApproverRegistry::load)
+        .transpose()?;
+    let approval = validate_paired_response(
         &response,
         &verified_request,
         &approval_key,
         &denial_key,
+        registry.as_ref(),
         deadline,
     )?;
+    if !trusted_approval_key_id(&config, &hex::encode(approval.signer_key_id))? {
+        bail!("preflight approver is no longer trusted");
+    }
 
     let evidence = PreflightEvidence {
         schema_version: 1,
@@ -156,9 +165,68 @@ pub fn test_approval(config_path: &Path, record_preflight: bool) -> Result<Appro
         target_id: config.target_id,
         request_id: evidence.request_id,
         request_hash: evidence.request_hash,
-        approver_key_id: key_id_hex(&approval_key),
+        approver_key_id: hex::encode(approval.signer_key_id),
         preflight_recorded: record_preflight,
     })
+}
+
+pub(crate) fn trusted_approval_key_id(config: &PluginConfig, id: &str) -> Result<bool> {
+    let primary =
+        syn_protocol::verifying_key_from_pem(&fs::read_to_string(&config.approval_public_key)?)?;
+    let registry = config
+        .approver_registry
+        .as_deref()
+        .map(ApproverRegistry::load)
+        .transpose()?;
+    if key_id_hex(&primary) == id {
+        return Ok(true);
+    }
+    if let Some(registry) = registry {
+        for record in registry.approvers {
+            if key_id_hex(&record.keys()?.0) == id {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+fn validate_paired_response(
+    response: &WireMessageV1,
+    request: &VerifiedRequest,
+    primary_approval: &p256::ecdsa::VerifyingKey,
+    primary_denial: &p256::ecdsa::VerifyingKey,
+    registry: Option<&ApproverRegistry>,
+    deadline: Instant,
+) -> Result<VerifiedDecision> {
+    if verify_decision(response.body.as_slice(), primary_approval).is_ok()
+        || verify_decision(response.body.as_slice(), primary_denial).is_ok()
+    {
+        return validate_response(
+            response,
+            request,
+            primary_approval,
+            primary_denial,
+            deadline,
+        );
+    }
+    if let Some(registry) = registry {
+        registry.validate()?;
+        for record in &registry.approvers {
+            let (approval, denial) = record.keys()?;
+            if verify_decision(response.body.as_slice(), &approval).is_ok()
+                || verify_decision(response.body.as_slice(), &denial).is_ok()
+            {
+                return validate_response(response, request, &approval, &denial, deadline);
+            }
+        }
+    }
+    validate_response(
+        response,
+        request,
+        primary_approval,
+        primary_denial,
+        deadline,
+    )
 }
 
 fn validate_response(
@@ -169,7 +237,7 @@ fn validate_response(
     deadline: Instant,
 ) -> Result<VerifiedDecision> {
     if response.kind == message_kind::UNAVAILABLE {
-        bail!("preflight expired without a valid Mac decision");
+        bail!("preflight expired without a valid paired-device decision");
     }
     if response.kind != message_kind::DECISION {
         bail!("agent returned an unexpected preflight message");
@@ -179,7 +247,7 @@ fn validate_response(
             && denial.decision.action == DecisionAction::Deny
             && denial.decision.authentication_class == AuthenticationClass::DeviceAuthenticated
         {
-            bail!("Mac explicitly denied the preflight request");
+            bail!("Paired device explicitly denied the preflight request");
         }
     }
     let approval = verify_decision(response.body.as_slice(), approval_key)?;
@@ -337,6 +405,96 @@ mod tests {
         next_invocation.request.request_id = vec![9; 16].into();
         next_invocation.payload_hash[0] ^= 1;
         assert!(evaluate(&signed, &next_invocation, deadline).is_err());
+    }
+
+    #[test]
+    fn additional_phone_preflight_requires_current_trust_role_binding_and_timeliness() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use syn_config::approvers::ApproverRecord;
+        use syn_protocol::{sign_decision, DecisionV1};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
+        let target = SigningKey::from_slice(&[1; 32]).unwrap();
+        let request = verify_request(
+            &hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let mac = SigningKey::from_slice(&[2; 32]).unwrap();
+        let mac_denial = SigningKey::from_slice(&[3; 32]).unwrap();
+        let phone = SigningKey::from_slice(&[4; 32]).unwrap();
+        let phone_denial = SigningKey::from_slice(&[5; 32]).unwrap();
+        let record = ApproverRecord {
+            schema_version: 1,
+            device_id: "test-phone".into(),
+            display_name: "Test phone".into(),
+            development: true,
+            approval_public_x963_base64: STANDARD
+                .encode(syn_protocol::verifying_key_sec1(phone.verifying_key())),
+            denial_public_x963_base64: STANDARD.encode(syn_protocol::verifying_key_sec1(
+                phone_denial.verifying_key(),
+            )),
+            client_certificate_pem:
+                "-----BEGIN CERTIFICATE-----\nMAMCAQE=\n-----END CERTIFICATE-----".into(),
+        };
+        let registry = ApproverRegistry {
+            schema_version: 1,
+            approvers: vec![record],
+        };
+        let decide = |action, class, key: &SigningKey| {
+            WireMessageV1::new(
+                message_kind::DECISION,
+                sign_decision(
+                    &DecisionV1::for_request(&request, action, class, key.verifying_key()),
+                    key,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let response = decide(
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            &phone,
+        );
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let evaluate = |response: &WireMessageV1, trust, deadline| {
+            validate_paired_response(
+                response,
+                &request,
+                mac.verifying_key(),
+                mac_denial.verifying_key(),
+                trust,
+                deadline,
+            )
+        };
+        assert!(evaluate(&response, Some(&registry), deadline).is_ok());
+        assert!(evaluate(&response, None, deadline).is_err());
+        let empty = ApproverRegistry::empty();
+        assert!(evaluate(&response, Some(&empty), deadline).is_err());
+        assert!(evaluate(&response, Some(&registry), Instant::now()).is_err());
+        assert!(evaluate(
+            &decide(
+                DecisionAction::ApproveOnce,
+                AuthenticationClass::SystemUserPresence,
+                &phone_denial
+            ),
+            Some(&registry),
+            deadline
+        )
+        .is_err());
+        assert!(evaluate(
+            &decide(
+                DecisionAction::Deny,
+                AuthenticationClass::DeviceAuthenticated,
+                &phone_denial
+            ),
+            Some(&registry),
+            deadline
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("explicitly denied"));
     }
 
     #[test]

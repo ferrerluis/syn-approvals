@@ -63,4 +63,6 @@ Apple enrollment, physical-device installation, hardware Secure Enclave proof an
 
 The new installer regressions reject unsupported commands/paths, partial or changed uploads, symlinks, other-device/account requests and development signing without an explicit grant. A shared `mobile-onboarding-v1.json` golden is decoded and re-encoded by Rust, macOS Swift and iOS Swift. The mobile UI also rejects setup controls after changing the Linux account.
 
-Host Rust tests: 110 passed (one platform-specific test ignored); macOS Swift: 150 passed; mobile: 5 state and 10 UI tests; native iOS: 20 tests passed after the profile-import adjustment. Formatting, host/ARM64 Clippy, TypeScript and Expo lint pass at the checked candidate stages. Exact non-development builds and live guest execution must still be completed for this installer candidate.
+Host Rust tests: 111 passed (one platform-specific test ignored); macOS Swift: 150 passed; mobile: 5 state and 10 UI tests; native iOS: 20 tests passed after the profile-import adjustment. Formatting, host/ARM64 Clippy, TypeScript and Expo lint pass at the checked candidate stages. Exact non-development builds and live guest execution must still be completed for this installer candidate.
+
+Phone-led updates also accept signed preflight from a currently paired additional approver. Request binding, approval/denial key roles, required authentication class and expiry remain enforced; installer evidence is checked against the current trust set. The returned signer ID identifies the device that actually approved.
