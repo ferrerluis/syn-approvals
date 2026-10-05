@@ -45,3 +45,14 @@ Android can reuse the typed native interface and UI, but currently has no native
 ## Candidate status
 
 The Swift rollback candidate is commit `12e207ddbfd710f7828ec85f8cfdabfde8da85b5`. Expo simulator build and real Pi acceptance are still being validated. Phone-led installation/update requires its own administrator-authorized maintenance path and isolated ARM64 validation before a real Pi installation is changed.
+
+To repeat the SSH setup check without authorizing installation, supply the hostname and a fingerprint already verified through an independent administrator session:
+
+```sh
+npx --no-install agent-device test flows/setup-ssh.yaml --maestro --platform ios \
+  --udid A0231B4A-C845-463B-BE74-8E5CBD9F2A04 \
+  --env HOST=your-machine-hostname --env FINGERPRINT=SHA256:verified-fingerprint \
+  --artifacts-dir artifacts/setup-ssh
+```
+
+The native review fixture at `macos/Tests/SynTests/Fixtures/mobile-review.json` is consumed by both Swift and JavaScript tests. It checks display fields and redaction; it never authorizes an invocation. Signed wire verification continues to use the protocol-v2 golden vectors.

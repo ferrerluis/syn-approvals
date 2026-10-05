@@ -9,7 +9,7 @@ target = project.new_target(:framework, 'SynMobileCore', :ios, '18.0')
 shared = %w[CBOR SynProtocol SafeDisplay DecisionBuilder KeyStore Transport TargetStore ReleaseIdentity]
 paths = shared.map { |n| File.join(repo, 'macos/Sources/Syn', n + '.swift') }
 paths += %w[IOSModel IOSSigning MobileSSH IOSSSHMetadata IOSTransportIdentityStore].map { |n| File.join(repo, 'ios/Sources', n + '.swift') }
-paths << File.join(root, 'native-core/SynMobileService.swift')
+paths += %w[SynMobileService MobileReview].map { |n| File.join(root, 'native-core', n + '.swift') }
 # Hide implementation dependencies from the framework's public Swift module.
 # The Expo facade exposes only Foundation values; all package code is linked here.
 implementation_dir = File.join(out, 'sources')

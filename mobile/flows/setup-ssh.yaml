@@ -1,0 +1,16 @@
+appId: org.syn-approvals.SynMobile.Debug
+---
+- launchApp
+- assertVisible: "Simulator development signer"
+- tapOn:
+    id: "add-machine"
+- tapOn:
+    id: "machine-host"
+- inputText: "${HOST}"
+- tapOn:
+    id: "check-host"
+- extendedWaitUntil:
+    visible: "${FINGERPRINT}"
+    timeout: 20000
+- assertVisible: "Trust verified machine"
+- takeScreenshot: "artifacts/agent-device-maestro-real-pi.png"

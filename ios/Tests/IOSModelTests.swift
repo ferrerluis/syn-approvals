@@ -68,3 +68,38 @@ private func freshRequest() throws -> (TargetRecord, Data) {
     #expect(model.pending.isEmpty)
     #expect(model.error != nil)
 }
+
+private func reviewRequest() -> VerifiedApprovalRequest {
+    VerifiedApprovalRequest(signedBytes: Data("opaque test request".utf8), payloadHash: Data(repeating: 3, count: 32),
+        requestID: Data(repeating: 2, count: 16), nonce: Data(repeating: 4, count: 16), targetID: "pi",
+        issuedAt: Date(timeIntervalSince1970: 30), expiresAt: Date(timeIntervalSince1970: 120),
+        invokingUID: 1000, invokingUser: "test", runAsUID: 0, runAsUser: "root", runAsGroup: "root",
+        workingDirectory: Data("/tmp".utf8), executable: Data("/usr/bin/true".utf8),
+        arguments: [Data("/usr/bin/true".utf8), Data("token=test-only".utf8)], environmentNames: ["PATH"],
+        environmentDigest: Data(repeating: 0xa7, count: 32), riskMarkers: ["noninteractive", "marker\u{202e}"],
+        releaseID: ReleaseIdentity.developmentID, releaseCommit: String(repeating: "0", count: 40))
+}
+@Test func mobileReviewMatchesJavaScriptGoldenWithoutWireData() throws {
+    let review = MobileReview(request: reviewRequest(), target: nil, revealed: [], authenticating: false)
+    let encoded = try JSONSerialization.jsonObject(with: JSONEncoder().encode(review)) as! [String: Any]
+    let url = try #require(Bundle.module.url(forResource: "mobile-review", withExtension: "json", subdirectory: "Fixtures"))
+    let golden = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+    #expect(NSDictionary(dictionary: encoded).isEqual(to: golden))
+}
+@Test func mobileReviewRevealChangesOnlyTheSelectedDisplayArgument() {
+    let request = reviewRequest()
+    let masked = MobileReview(request: request, target: nil, revealed: [], authenticating: false)
+    let revealed = MobileReview(request: request, target: nil, revealed: [1], authenticating: true)
+    #expect(masked.arguments[1].value == nil)
+    #expect(revealed.arguments[1].value == SafeDisplay.render(request.arguments[1]))
+    #expect(revealed.arguments[0].value == masked.arguments[0].value)
+    #expect(revealed.id == masked.id)
+    #expect(revealed.environmentDigest == masked.environmentDigest)
+    #expect(revealed.authenticating)
+}
+@Test func mobileReviewCannotDisplayAnotherTargetsNameOrFingerprint() throws {
+    let (foreignTarget, _) = try freshRequest()
+    let review = MobileReview(request: reviewRequest(), target: foreignTarget, revealed: [], authenticating: false)
+    #expect(review.targetName == "pi")
+    #expect(review.targetKeyFingerprint == nil)
+}

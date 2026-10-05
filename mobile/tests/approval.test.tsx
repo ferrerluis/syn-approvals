@@ -14,7 +14,7 @@ jest.mock('../src/native', () => ({
 const state = (): State => ({ schemaVersion: 1, deviceID: 'test-device', releaseID: '00000000000000', developmentSigner: true,
   targets: [{ id: 'test-target', name: 'Test machine', connected: true }], setup: { host: '', port: 22, checking: false },
   requests: [{ id: 'request-one', targetID: 'test-target', targetName: 'Test machine', executable: '/usr/bin/true',
-    arguments: [{ index: 0, value: '/usr/bin/true' }, { index: 1 }], workingDirectory: '/home/test', invokingUser: 'test', runAsUser: 'root',
+    arguments: [{ index: 0, value: '/usr/bin/true' }, { index: 1 }], workingDirectory: '/home/test', invokingUID: 1000, invokingUser: 'test', runAsUID: 0, runAsUser: 'root', runAsGroup: 'root', environmentNames: ['PATH'], environmentDigest: 'a7'.repeat(32), riskMarkers: ['noninteractive'],
     expiresAt: Date.now() + 90000, authenticating: false }] });
 beforeEach(() => { jest.clearAllMocks(); jest.mocked(readState).mockResolvedValue(state()); });
 
@@ -71,5 +71,38 @@ test('A waiting setup operation cannot block approval of its live preflight requ
   fireEvent.press(ui.getByTestId('approve-request-one'));
   await waitFor(() => expect(native!.approve).toHaveBeenCalledWith('request-one'));
   await act(async () => finishPairing());
+  ui.unmount();
+});
+
+test('Review shows native identities, group, environment digest and warnings', async () => {
+  const ui = render(<App />);
+  await ui.findByText('Source user: test (UID 1000)');
+  expect(ui.getByText('Run as: root (UID 0), group root')).toBeTruthy();
+  expect(ui.getByText('Environment names')).toBeTruthy();
+  expect(ui.getByText('PATH')).toBeTruthy();
+  expect(ui.getByText('a7'.repeat(32))).toBeTruthy();
+  expect(ui.getByTestId('warnings-request-one').props.children.join('')).toContain('noninteractive');
+  ui.unmount();
+});
+
+test('Malformed native events remove stale approval controls', async () => {
+  const ui = render(<App />);
+  await ui.findByText('Connected');
+  const receive = jest.mocked(native!.addListener).mock.calls[0][1];
+  await act(async () => receive({state: JSON.stringify({schemaVersion: 99})}));
+  expect(ui.queryByTestId('approve-request-one')).toBeNull();
+  expect(ui.getByText('Syn received invalid native state. Restart the app.')).toBeTruthy();
+  expect(native!.approve).not.toHaveBeenCalled();
+  ui.unmount();
+});
+
+test('A native storage error removes stale approval controls', async () => {
+  const ui = render(<App />);
+  await ui.findByText('Connected');
+  const receive = jest.mocked(native!.addListener).mock.calls[0][1];
+  await act(async () => receive({error: 'Syn could not open native storage.'}));
+  expect(ui.queryByTestId('approve-request-one')).toBeNull();
+  expect(ui.getByText('Syn could not open native storage.')).toBeTruthy();
+  expect(native!.approve).not.toHaveBeenCalled();
   ui.unmount();
 });

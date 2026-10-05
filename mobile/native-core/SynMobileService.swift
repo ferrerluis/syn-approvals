@@ -57,17 +57,9 @@ public final class SynMobileService {
                 connected: model.connected.contains(target.id))
         }
         let requests = model.pending.map { request in
-            MobileRequest(id: request.id, targetID: request.targetID,
-                targetName: model.targets.first(where: { $0.id == request.targetID })?.displayName ?? request.targetID,
-                executable: SafeDisplay.render(request.executable),
-                arguments: request.arguments.enumerated().map { index, data in
-                    MobileArgument(index: index,
-                        value: SafeDisplay.likelyContainsSecret(data) && !(revealed[request.id]?.contains(index) ?? false)
-                            ? nil : SafeDisplay.render(data))
-                },
-                workingDirectory: SafeDisplay.render(request.workingDirectory),
-                invokingUser: request.invokingUser, runAsUser: request.runAsUser,
-                expiresAt: request.expiresAt.timeIntervalSince1970 * 1000,
+            MobileReview(request: request,
+                target: model.targets.first(where: { $0.id == request.targetID }),
+                revealed: revealed[request.id] ?? [],
                 authenticating: model.authenticating.contains(request.id))
         }
         let state = MobileState(schemaVersion: 1, deviceID: model.deviceID,
@@ -86,18 +78,12 @@ private struct MobileState: Encodable {
     let developmentSigner: Bool
     let releaseID: String
     let targets: [MobileTarget]
-    let requests: [MobileRequest]
+    let requests: [MobileReview]
     let setup: MobileSetup
     let error: String?
     let status: String?
 }
 private struct MobileTarget: Encodable { let id: String; let name: String; let connected: Bool }
-private struct MobileArgument: Encodable { let index: Int; let value: String? }
-private struct MobileRequest: Encodable {
-    let id: String; let targetID: String; let targetName: String; let executable: String
-    let arguments: [MobileArgument]; let workingDirectory: String
-    let invokingUser: String; let runAsUser: String; let expiresAt: Double; let authenticating: Bool
-}
 private struct MobileSetup: Encodable {
     let host: String; let port: Int; let checking: Bool; let fingerprint: String?; let bootstrapCommand: String?
 }

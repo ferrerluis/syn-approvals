@@ -1,0 +1,31 @@
+{
+  "id": "pi:02020202020202020202020202020202",
+  "targetID": "pi",
+  "targetName": "pi",
+  "executable": "\"/usr/bin/true\"",
+  "arguments": [
+    {
+      "index": 0,
+      "value": "\"/usr/bin/true\""
+    },
+    {
+      "index": 1
+    }
+  ],
+  "workingDirectory": "\"/tmp\"",
+  "invokingUID": 1000,
+  "invokingUser": "\"test\"",
+  "runAsUID": 0,
+  "runAsUser": "\"root\"",
+  "runAsGroup": "\"root\"",
+  "environmentNames": [
+    "\"PATH\""
+  ],
+  "environmentDigest": "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+  "riskMarkers": [
+    "\"noninteractive\"",
+    "\"marker\\u{202E}\""
+  ],
+  "expiresAt": 120000,
+  "authenticating": false
+}
