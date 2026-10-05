@@ -415,8 +415,16 @@ mod tests {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
         let target = SigningKey::from_slice(&[1; 32]).unwrap();
-        let request = verify_request(
+        let mut request = verify_request(
             &hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        // Keep the golden vector fixed while testing this compiled release.
+        request.request.release_id = syn_protocol::release_id().into();
+        request.request.release_commit = syn_protocol::release_commit().into();
+        let request = verify_request(
+            &sign_request(&request.request, &target).unwrap(),
             target.verifying_key(),
         )
         .unwrap();

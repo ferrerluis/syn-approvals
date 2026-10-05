@@ -280,9 +280,9 @@ mod tests {
     #[test]
     fn new_missing_and_duplicate_inventory_entries_fail_closed() {
         let record = record_provider(path(), 0o755, None).unwrap();
-        assert!(check_inventory(&[record.clone()], BTreeSet::from([path()])).is_ok());
+        assert!(check_inventory(std::slice::from_ref(&record), BTreeSet::from([path()])).is_ok());
         assert!(check_inventory(&[], BTreeSet::from([path()])).is_err());
-        assert!(check_inventory(&[record.clone()], BTreeSet::new()).is_err());
+        assert!(check_inventory(std::slice::from_ref(&record), BTreeSet::new()).is_err());
         assert!(check_inventory(&[record.clone(), record], BTreeSet::from([path()])).is_err());
     }
 

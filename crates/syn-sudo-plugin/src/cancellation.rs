@@ -63,7 +63,7 @@ impl SignalGuard {
         // SAFETY: zero initializes the platform C structure; sigemptyset
         // initializes its mask before sigaction reads it.
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = cancel as usize;
+        action.sa_sigaction = cancel as *const () as usize;
         // No SA_RESTART: cancellation should wake a blocked IO operation.
         unsafe { libc::sigemptyset(&mut action.sa_mask) };
         for signal in SIGNALS {
@@ -157,7 +157,7 @@ mod tests {
             return;
         }
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
-        action.sa_sigaction = original as usize;
+        action.sa_sigaction = original as *const () as usize;
         action.sa_flags = libc::SA_RESTART;
         unsafe {
             libc::sigemptyset(&mut action.sa_mask);
@@ -195,7 +195,7 @@ mod tests {
                 unsafe { libc::sigaction(libc::SIGINT, std::ptr::null(), &mut restored) },
                 0
             );
-            assert_eq!(restored.sa_sigaction, original as usize);
+            assert_eq!(restored.sa_sigaction, original as *const () as usize);
             assert_ne!(restored.sa_flags & libc::SA_RESTART, 0);
         }
     }

@@ -761,10 +761,7 @@ fn write_until(
     while !bytes.is_empty() {
         if let Some(escape) = password_escape.as_deref_mut() {
             if escape.requested()? {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "password requested",
-                ));
+                return Err(std::io::Error::other("password requested"));
             }
         }
         stream.set_write_timeout(Some(remaining(deadline)?.min(IO_SLICE)))?;
@@ -798,10 +795,7 @@ fn read_until(
     while received < bytes.len() {
         if let Some(escape) = password_escape.as_deref_mut() {
             if escape.requested()? {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "password requested",
-                ));
+                return Err(std::io::Error::other("password requested"));
             }
         }
         stream.set_read_timeout(Some(remaining(deadline)?.min(IO_SLICE)))?;
@@ -1456,7 +1450,7 @@ mod tests {
     fn additional_device_decisions_require_current_trust_and_correct_class() {
         use base64::{engine::general_purpose::STANDARD, Engine};
         use syn_config::approvers::{ApproverRecord, ApproverRegistry};
-        use syn_protocol::{sign_decision, DecisionV1};
+        use syn_protocol::{sign_decision, sign_request, DecisionV1};
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
         let target = SigningKey::from_slice(&[1; 32]).unwrap();
@@ -1464,8 +1458,16 @@ mod tests {
         let primary_denial = SigningKey::from_slice(&[3; 32]).unwrap();
         let approval = SigningKey::from_slice(&[4; 32]).unwrap();
         let denial = SigningKey::from_slice(&[5; 32]).unwrap();
-        let request = verify_request(
+        let mut request = verify_request(
             &hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        // Keep the golden vector fixed while testing this compiled release.
+        request.request.release_id = syn_protocol::release_id().into();
+        request.request.release_commit = syn_protocol::release_commit().into();
+        let request = verify_request(
+            &sign_request(&request.request, &target).unwrap(),
             target.verifying_key(),
         )
         .unwrap();
