@@ -1508,8 +1508,25 @@ mod tests {
         );
         assert!(evaluate(&signed, None).is_err());
         assert!(evaluate(&signed, Some(&ApproverRegistry::empty())).is_err());
-        let wrong_key = sign_decision(&decision, &denial).unwrap();
-        assert!(evaluate(&wrong_key, Some(&registry)).is_err());
+        // A mismatched key ID fails at signing. Separately exercise the
+        // target's rejection of a valid signature under the wrong key role.
+        assert!(sign_decision(&decision, &denial).is_err());
+        let wrong_role = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            denial.verifying_key(),
+        );
+        let signed_wrong_role = sign_decision(&wrong_role, &denial).unwrap();
+        assert!(evaluate(&signed_wrong_role, Some(&registry)).is_err());
+        let wrong_class = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::DeviceAuthenticated,
+            approval.verifying_key(),
+        );
+        // An approval without user presence is rejected before signing.
+        assert!(sign_decision(&wrong_class, &approval).is_err());
         let denial_decision = DecisionV1::for_request(
             &request,
             DecisionAction::Deny,

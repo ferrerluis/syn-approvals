@@ -1,6 +1,6 @@
 # Expo mobile implementation progress
 
-This is an incomplete local candidate on `codex/ios-approver`, in the existing isolated worktree. Swift rollback point: `12e207ddbfd710f7828ec85f8cfdabfde8da85b5`. No changes to the real Pi installation have been applied during this Expo implementation. The registered goal remains active.
+This is an incomplete local candidate on `codex/ios-approver`, in the existing isolated worktree. Swift rollback point: `12e207ddbfd710f7828ec85f8cfdabfde8da85b5`. No changes to the real Pi installation have been applied during this Expo implementation. The registered goal remains incomplete.
 
 ## Implemented
 
@@ -28,7 +28,7 @@ This is an incomplete local candidate on `codex/ios-approver`, in the existing i
 | Rust tests | 106 passed across workspace test binaries/doc tests |
 | macOS Swift tests | 149 passed with warnings treated as errors |
 | Golden vectors | Rust regenerated protocol-v2 and both fixture copies matched; Swift review encoding also matches a shared JavaScript display fixture |
-| ARM64 checks | workspace/all-targets type-check and sudo plugin Clippy with warnings denied |
+| ARM64 checks | workspace/all-targets type-check and Clippy with warnings denied; 124 Rust tests executed on isolated Ubuntu ARM64 |
 | Privacy / release staging | log privacy 4 tests; iOS release staging 3 tests, including generated-cache allowance and hidden-source rejection |
 
 Detailed local logs are under `/private/tmp/syn-expo-*` and `mobile/artifacts/`. Simulator UUID: `A0231B4A-C845-463B-BE74-8E5CBD9F2A04`. Screenshot `mobile/artifacts/01-standalone-start.png` proves app startup and its signer label. Screenshot `mobile/artifacts/02-real-pi-ssh-fingerprint.png` proves SSH contact with the real Pi; its displayed Ed25519 fingerprint matches an independent existing SSH session. Neither screenshot proves signed request reception or sudo execution. Current-build screenshots and exact compile metadata are recorded in ignored `mobile/artifacts/2026-10-05-expo-evidence.json`. A Maestro-compatible SSH setup flow passed through agent-device against the real Pi and is now kept at `mobile/flows/setup-ssh.yaml`; it checks the independently trusted fingerprint without authorizing setup. Recorded `.ad` replay rejected a changed accessibility ancestry before its first tap; that failed replay remains in the evidence record.
@@ -40,6 +40,14 @@ Phone-first installation, matching-release updates and rollback are not implemen
 The real Pi runs its prior release and does not yet have mobile enrollment commands. A matching candidate must be installed only after isolated Ubuntu ARM64 testing with independent recovery access. Required real-Pi proof remains: Connected, signed pending request, Approve, the original `/usr/bin/sudo -n /usr/bin/true` exits zero, a fresh repeat needs approval, and Mac pairing still works. Live race/failure checks are still pending. The unsigned production Expo app compiled successfully at candidate `1e5766814011f6261627a26d08e2ff7d34993425`, with embedded JavaScript, a Secure Enclave symbol, and no simulator signer in its native framework. Subsequent review checkpoint builds are recorded separately with their exact source commit in local evidence.
 
 An isolated Ubuntu 26.04 ARM64 QEMU guest is running with independently verified root SSH recovery under `/private/tmp/syn-expo-arm64-vm`, using an official checksum-verified cloud image. It is separate from the Pi and uses a disposable SSH identity. Recovery checks confirm `aarch64`, Ubuntu `26.04`, root UID `0` and active SSH. The default sudo is sudo-rs and sudo.ws is also installed; the existing alternate-provider audit must be preserved during installation. Its image SHA256 is `63a93bd5a8d76e33b15ceb5daa3657bd79be804748051ab178e643b0f5da22e7`.
+
+## Native Ubuntu ARM64 execution
+
+All 124 existing Rust tests passed as the unprivileged `syn-test` account in the isolated Ubuntu 26.04 ARM64 guest, including the explicitly enabled read-only sudo search-path test. Cross-built executables were linked against that guest's actual public PAM library and SHA-256 checked before execution. See [exact test artifacts and recovery results](2026-10-05-arm64-tests.json).
+
+The first runs exposed two invalid Linux-only test fixtures: a mismatched signing key ID and an approval without the required authentication class. Both are already rejected before signing. The corrected test asserts those rejections and separately verifies target rejection of a valid signature under the wrong key role; production authentication code is unchanged. Rust formatting and workspace/all-target ARM64 Clippy with warnings denied pass after this correction.
+
+Root SSH recovery remains available, no Syn sudoers file is installed in the guest, and unprivileged noninteractive sudo exits 1. These tests do not exercise a Syn installation or the original real-Pi command. The latest simulator and unsigned production app builds remain tied to `dabe1490c8a7a5cd2f29305922e2dfda216a3939`; only Linux test fixtures and validation records changed afterward.
 
 ## Dependency findings
 

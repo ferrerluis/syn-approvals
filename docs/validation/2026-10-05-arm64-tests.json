@@ -1,0 +1,110 @@
+{
+  "milestone_complete": false,
+  "description": "Existing Rust unit tests executed unprivileged on an isolated Ubuntu ARM64 guest; this does not prove live Pi sudo approval or phone installation.",
+  "guest": {
+    "distribution": "Ubuntu 26.04",
+    "image_sha256": "63a93bd5a8d76e33b15ceb5daa3657bd79be804748051ab178e643b0f5da22e7",
+    "recovery": {
+      "architecture": "aarch64",
+      "recovery_uid": 0,
+      "ssh_active": true,
+      "syn_sudoers_absent": true,
+      "unprivileged_sudo_exit": 1,
+      "unprivileged_sudo_requires_password": false
+    }
+  },
+  "rust_tests": {
+    "guest_architecture": "aarch64",
+    "test_user": "syn-test",
+    "manifest": {
+      "source_base_commit": "dabe1490c8a7a5cd2f29305922e2dfda216a3939",
+      "test_patch_sha256": "8cc43e5a8f2e1da25683cf655d06db9dfa7a4c17c5a4e60f281d968f10d8bcf8",
+      "artifacts": [
+        {
+          "file": "synctl-78bd5fd0a9d9ffca",
+          "sha256": "6e3086885ddd4ed0c4c1acb2dfda8c5d3cd1b2efd556c6eac5f0f14c21cf53a6"
+        },
+        {
+          "file": "syn_sim-7c7017465768888e",
+          "sha256": "228426e45263f94bd3022430a4d2e1ad71d6bf905f6be5d688e8f8f071a24ad5"
+        },
+        {
+          "file": "syn_config-200f9197c1d56fed",
+          "sha256": "089156b40ab158640cfcb2cb1e318fc9e1011177f401db5538de46513ba9a68c"
+        },
+        {
+          "file": "syn_protocol-5efd8c06f214d78b",
+          "sha256": "cbab5dca3891a7b0074f4439bce0260a16f664c99eaa4b0a6dcda7ede3d364ec"
+        },
+        {
+          "file": "syn_agent-bdf6f927e24f4aa1",
+          "sha256": "8d0529bbc7e87228bdc2dd9c74b822e819d3371c29895549f56d3047a5fc71c6"
+        },
+        {
+          "file": "syn_agent-14339da447522529",
+          "sha256": "94fbed48cd373aff132dba5f181ff8a4914c6220e148570259cd1c2301b0dadd"
+        },
+        {
+          "file": "syn_approval-a267b06dbe4dea7e",
+          "sha256": "3698d35e47a2d0ff34434fb2b963adbdfde7188b8ee2f099279af267ac35ab7e"
+        }
+      ]
+    },
+    "results": [
+      {
+        "file": "synctl-78bd5fd0a9d9ffca",
+        "exit_code": 0,
+        "passed": 67,
+        "failed": 0
+      },
+      {
+        "file": "syn_sim-7c7017465768888e",
+        "exit_code": 0,
+        "passed": 0,
+        "failed": 0
+      },
+      {
+        "file": "syn_config-200f9197c1d56fed",
+        "exit_code": 0,
+        "passed": 10,
+        "failed": 0
+      },
+      {
+        "file": "syn_protocol-5efd8c06f214d78b",
+        "exit_code": 0,
+        "passed": 10,
+        "failed": 0
+      },
+      {
+        "file": "syn_agent-bdf6f927e24f4aa1",
+        "exit_code": 0,
+        "passed": 15,
+        "failed": 0
+      },
+      {
+        "file": "syn_agent-14339da447522529",
+        "exit_code": 0,
+        "passed": 0,
+        "failed": 0
+      },
+      {
+        "file": "syn_approval-a267b06dbe4dea7e",
+        "exit_code": 0,
+        "passed": 22,
+        "failed": 0
+      }
+    ],
+    "total_passed": 124,
+    "total_failed": 0
+  },
+  "checks": {
+    "rust_formatting": "passed",
+    "arm64_workspace_all_targets_clippy_warnings_denied": "passed"
+  },
+  "simulator_and_device_app_source_commit": "dabe1490c8a7a5cd2f29305922e2dfda216a3939",
+  "changes_after_app_build": "Only Linux unit-test fixture expectations and validation documentation.",
+  "root_installer_changes_applied": false,
+  "real_pi_installation_changes_applied": false,
+  "signed_real_pi_request_verified": false,
+  "original_real_pi_sudo_approval_verified": false
+}
