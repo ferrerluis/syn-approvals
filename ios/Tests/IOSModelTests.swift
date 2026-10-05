@@ -114,3 +114,59 @@ private func reviewRequest() -> VerifiedApprovalRequest {
     let golden = try JSONSerialization.jsonObject(with: data) as! [String: Any]
     #expect(NSDictionary(dictionary: encoded).isEqual(to: golden))
 }
+
+@Test @MainActor func setupWaitsForTheExpectedMachinesHandshake() async throws {
+    let model = try testModel()
+    let (target, _) = try freshRequest()
+    model.setForeground(true)
+    var finished = false
+    let waiting = Task { @MainActor in
+        try await model.waitForSetupConnection(target.id, timeout: 2)
+        finished = true
+    }
+    await Task.yield()
+    var other = target; other.targetID = "other-test-machine"
+    model.receive(.success(WireMessage(kind: .hello, body: try SynProtocol.helloBody(targetID: other.id))), target: other)
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(!finished)
+    model.receive(.success(WireMessage(kind: .hello, body: try SynProtocol.helloBody(targetID: target.id))), target: target)
+    try await waiting.value
+    #expect(finished)
+}
+@Test @MainActor func setupConnectionWaitStopsForBackgroundExpiryAndIntegrityFailure() async throws {
+    let model = try testModel()
+    let (target, signed) = try freshRequest()
+    do { try await model.waitForSetupConnection(target.id, timeout: 0); Issue.record("Background setup must stop") } catch {}
+    model.setForeground(true)
+    do { try await model.waitForSetupConnection(target.id, timeout: 0); Issue.record("An absent connection must time out") } catch {}
+    model.receive(.success(WireMessage(kind: .request, body: signed)), target: target)
+    do { try await model.waitForSetupConnection(target.id); Issue.record("An integrity failure must stop setup") } catch {}
+}
+@Test func matchingPackageAfterRecoveryDoesNotSkipActivation() throws {
+    let release = ReleaseIdentity(schemaVersion: 1, releaseID: "20261005162603", commit: String(repeating: "a", count: 40))
+    let url = try #require(Bundle.module.url(forResource: "mobile-setup-probe-v1", withExtension: "json", subdirectory: "Fixtures"))
+    var fields = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+    let golden = try JSONDecoder().decode(MobileSetupProbe.self, from: Data(contentsOf: url))
+    #expect(golden.protocolVersion == 1)
+    #expect(golden.deviceID == "00000000-0000-4000-8000-000000000001")
+    #expect(golden.matchesArmedRelease(release))
+    fields.removeValue(forKey: "installation_armed")
+    func probe() throws -> MobileSetupProbe { try JSONDecoder().decode(MobileSetupProbe.self, from: JSONSerialization.data(withJSONObject: fields)) }
+    #expect(try !probe().matchesArmedRelease(release))
+    fields["installation_armed"] = false
+    #expect(try !probe().matchesArmedRelease(release))
+    fields["installation_armed"] = true
+    #expect(try probe().matchesArmedRelease(release))
+    fields["installed_release_commit"] = String(repeating: "b", count: 40)
+    #expect(try !probe().matchesArmedRelease(release))
+}
+
+@Test @MainActor func aReconnectedMachineClearsItsTemporaryConnectionError() throws {
+    let model = try testModel()
+    let (target, _) = try freshRequest()
+    model.receive(.failure(URLError(.networkConnectionLost)), target: target)
+    #expect(model.error != nil)
+    model.receive(.success(WireMessage(kind: .hello, body: try SynProtocol.helloBody(targetID: target.id))), target: target)
+    #expect(model.error == nil)
+    #expect(model.connected.contains(target.id))
+}

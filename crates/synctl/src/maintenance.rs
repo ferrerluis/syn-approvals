@@ -1204,6 +1204,18 @@ fn verify_mobile_operation(
     }
     validate_mobile_binding(&request, config)
 }
+#[derive(Serialize)]
+struct MobileSetupProbeReport<'a> {
+    protocol_version: u16,
+    managed_user: &'a str,
+    device_id: &'a str,
+    allow_development: bool,
+    listen_ips: Vec<std::net::IpAddr>,
+    target_id: Option<String>,
+    installed_release_id: Option<String>,
+    installed_release_commit: Option<String>,
+    installation_armed: bool,
+}
 pub fn serve_mobile(device: &str) -> Result<()> {
     require_root()?;
     let config = load_mobile(device)?;
@@ -1239,11 +1251,28 @@ pub fn serve_mobile(device: &str) -> Result<()> {
                 None
             };
             let installed = installed_metadata()?;
-            println!(
-                "{}",
-                serde_json::json!({"ok":true,"data":{"protocol_version":1,"managed_user":config.binding.managed_user,
-                "device_id":device,"allow_development":config.allow_development,"listen_ips":addresses,"target_id":target_id,"installed_release_id":installed.as_ref().map(|v| &v.release_id),"installed_release_commit":installed.as_ref().map(|v| &v.commit)}})
-            );
+            let installation_armed = crate::installer::check_installed_coupling(Path::new(
+                syn_config::DEFAULT_INSTALL_STATE,
+            ))
+            .is_ok()
+                && syn_config::PluginConfig::load(syn_config::DEFAULT_PLUGIN_CONFIG).is_ok_and(
+                    |plugin| {
+                        plugin.managed_user == config.binding.managed_user
+                            && plugin.managed_uid == config.binding.managed_uid
+                    },
+                );
+            let report = MobileSetupProbeReport {
+                protocol_version: PROTOCOL,
+                managed_user: &config.binding.managed_user,
+                device_id: device,
+                allow_development: config.allow_development,
+                listen_ips: addresses,
+                target_id,
+                installed_release_id: installed.as_ref().map(|value| value.release_id.clone()),
+                installed_release_commit: installed.as_ref().map(|value| value.commit.clone()),
+                installation_armed,
+            };
+            println!("{}", serde_json::json!({"ok":true,"data":report}));
             Ok(())
         }
         MobileRequest::Maintenance(Request::Retain {
@@ -1557,6 +1586,27 @@ mod mobile_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_probe_matches_swift_golden() {
+        let report = MobileSetupProbeReport {
+            protocol_version: 1,
+            managed_user: "test",
+            device_id: "00000000-0000-4000-8000-000000000001",
+            allow_development: true,
+            listen_ips: vec!["100.64.0.1".parse().unwrap()],
+            target_id: Some("test-target".into()),
+            installed_release_id: Some("20261005162603".into()),
+            installed_release_commit: Some("a".repeat(40)),
+            installation_armed: true,
+        };
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../macos/Tests/SynTests/Fixtures/mobile-setup-probe-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(serde_json::to_value(report).unwrap(), golden);
+    }
+
     use std::sync::atomic::{AtomicU64, Ordering};
 
     const OP: &str = "0123456789abcdef0123456789abcdef";

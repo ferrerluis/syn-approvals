@@ -1,0 +1,13 @@
+{
+  "protocol_version": 1,
+  "managed_user": "test",
+  "device_id": "00000000-0000-4000-8000-000000000001",
+  "allow_development": true,
+  "listen_ips": [
+    "100.64.0.1"
+  ],
+  "target_id": "test-target",
+  "installed_release_id": "20261005162603",
+  "installed_release_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "installation_armed": true
+}

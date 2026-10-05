@@ -20,14 +20,14 @@ Simulator development builds use all-zero release metadata. Physical-device and 
 
 ## Pair an additional iPhone
 
-Syn must already be installed on the target at the app's matching release. This candidate adds independent iPhone identity and pairing; it does **not yet implement** the Mac app's entire first-install/update workflow.
+The Expo app supports first installation and matching-release updates through its fixed native setup flow. Its bundled helper and source are checked against the app’s release; initial administrator authorization remains necessary.
 
-1. Choose **Add a machine**, enter its reachable SSH hostname and port, and choose **Check connection**.
-2. Compare the SSH host fingerprint through independent trusted access before choosing **Trust this host**. Changed host keys stop setup.
+1. Choose **Add a machine**, enter its reachable SSH hostname and port, and choose **Check machine**.
+2. Compare the SSH host fingerprint through independent trusted access before choosing **Trust verified machine**. Changed host keys stop setup.
 3. Run the displayed authorization command once in a trusted administrator terminal. The iPhone does not collect a remote administrator password.
 4. Continue in the iPhone app. It sends only public enrollment material through a forced SSH command, receives its public target profile, then connects directly to the target. Existing Mac pairing is retained.
 
-The maintenance key permits exactly two operations: enroll that same device ID and read its public target profile. It cannot submit an executable, argv, shell, arbitrary file, or an approval decision through SSH. Root enrollment changes the trusted approver registry used independently by both the agent and sudo plug-in. Revoke a device through trusted administrator access:
+The maintenance key permits enrollment of that device, its public target profile, fixed bounded artifact uploads, and the existing fixed installation/update/recovery phases. It cannot supply a command, shell, arbitrary path, or an approval decision through SSH. Setup waits for the pinned direct connection before requesting its two signed approval tests. A matching package left after recovery does not skip reactivation. Root enrollment changes the trusted approver registry used independently by both the agent and sudo plug-in. Revoke a device through trusted administrator access:
 
 ```sh
 /usr/bin/sudo /usr/bin/synctl approvers revoke --device-id DEVICE_UUID --apply

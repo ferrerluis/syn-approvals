@@ -117,6 +117,7 @@ final class IOSModel: ObservableObject {
         guard let host = checkedHost, let port = checkedPort, let approvedHostKey,
               machineHost.trimmingCharacters(in: .whitespacesAndNewlines) == host, Int(machinePort) == port,
               checkedUser == machineUser, !enrollmentText.isEmpty else { error = "Check and verify the machine’s SSH identity first."; return }
+        error = nil
         installing = true
         defer { installing = false }
         do {
@@ -126,8 +127,25 @@ final class IOSModel: ObservableObject {
                 development: developmentSigner, enrollment: enrollment, configure: { target in
                     self.profileText = String(decoding: try JSONEncoder().encode(target), as: UTF8.self)
                     guard self.importProfile() else { throw SynProtocolError.invalid("Could not save the paired machine.") }
+                }, waitForConnection: { targetID in
+                    try await self.waitForSetupConnection(targetID)
                 }, progress: { self.status = $0 })
         } catch { self.error = "Setup could not complete: \(error.localizedDescription)" }
+    }
+
+    // Wait for the pinned connection's identity handshake before asking the
+    // target to emit a preflight request. Merely starting NWConnection races it.
+    func waitForSetupConnection(_ targetID: String, timeout: TimeInterval = TargetConnection.setupTimeoutSeconds) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            try Task.checkCancellation()
+            guard foreground, !failures.contains(targetID) else {
+                throw SynProtocolError.invalid("Open Syn and retry the machine connection before setup.")
+            }
+            if connected.contains(targetID) { return }
+            guard Date() < deadline else { throw SynProtocolError.invalid("The direct approval connection timed out.") }
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 
     @discardableResult
@@ -201,6 +219,7 @@ final class IOSModel: ObservableObject {
                 guard !connected.contains(target.id) else { throw SynProtocolError.invalid("Duplicate machine identity handshake.") }
                 try SynProtocol.verifyHello(message.body, targetID: target.id)
                 connected.insert(target.id)
+                if error?.hasPrefix("Connection to \(target.displayName) stopped: ") == true { error = nil }
                 let connection = connections[target.id]
                 let hello = try SynProtocol.helloBody(targetID: target.id)
                 Task {

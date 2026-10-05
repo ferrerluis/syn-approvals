@@ -10,10 +10,14 @@ struct MobileSetupProbe: Decodable, Sendable {
     let targetID: String?
     let installedReleaseID: String?
     let installedReleaseCommit: String?
+    let installationArmed: Bool?
+    func matchesArmedRelease(_ release: ReleaseIdentity) -> Bool {
+        installationArmed == true && installedReleaseID == release.releaseID && installedReleaseCommit == release.commit
+    }
     enum CodingKeys: String, CodingKey {
         case protocolVersion = "protocol_version", managedUser = "managed_user", deviceID = "device_id"
         case allowDevelopment = "allow_development", listenIPs = "listen_ips", targetID = "target_id"
-        case installedReleaseID = "installed_release_id", installedReleaseCommit = "installed_release_commit"
+        case installedReleaseID = "installed_release_id", installedReleaseCommit = "installed_release_commit", installationArmed = "installation_armed"
     }
 }
 private struct MobileEnvelope<T: Decodable>: Decodable { let ok: Bool; let data: T }
@@ -31,16 +35,17 @@ private struct MobileTransition: Decodable {
 enum MobileOnboarding {
     static func run(client: MobileSSH, host: String, port: Int, user: String, device: String,
                     development: Bool, enrollment: IOSEnrollment,
-                    configure: (TargetRecord) throws -> Void, progress: (String) -> Void) async throws {
+                    configure: (TargetRecord) throws -> Void, waitForConnection: (String) async throws -> Void, progress: (String) -> Void) async throws {
         let probe = try decode(MobileSetupProbe.self, from: await client.probe())
         guard probe.protocolVersion == 1, probe.managedUser == user, probe.deviceID == device,
               !development || probe.allowDevelopment else { throw SynProtocolError.invalid("Setup authorization does not match this phone and Linux account.") }
         let release = ReleaseIdentity.current
-        if probe.installedReleaseID == release.releaseID && probe.installedReleaseCommit == release.commit {
+        if probe.matchesArmedRelease(release) {
             progress("Pairing this phone")
             var target = try JSONDecoder().decode(TargetRecord.self, from: await client.enroll(JSONEncoder().encode(enrollment)))
             target.webSocketURL = try directURL(target.webSocketURL, host: host)
             try configure(target)
+            try await waitForConnection(target.id)
             progress("Connected to the matching Syn release")
             return
         }
@@ -90,6 +95,8 @@ enum MobileOnboarding {
             target.installedReleaseID = release.releaseID; target.installedReleaseCommit = release.commit
             target.ssh = SSHConnectionSettings(hostname: host, username: user, port: UInt16(port), hostTrustSource: nil)
             try configure(target)
+            progress("Connecting before the setup approval test")
+            try await waitForConnection(target.id)
             progress("Approve the setup test request in Syn")
             let activated = try decode(MobileTransition.self, from: await client.phase(.activate, operation: request.operationID))
             try verify(activated, operation: request.operationID, release: release.releaseID, phase: "armed_pending_final_approval", armed: true)
