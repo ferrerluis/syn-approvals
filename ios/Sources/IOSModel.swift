@@ -76,6 +76,9 @@ final class IOSModel: ObservableObject {
     func checkHost() async {
         guard !checkingHost else { return }
         checkingHost = true
+        // A failed check must not display a previous machine's trust context.
+        hostCandidate = nil; bootstrapCommand = nil; approvedHostKey = nil
+        checkedHost = nil; checkedPort = nil
         defer { checkingHost = false }
         do {
             guard let port = Int(machinePort) else { throw SynProtocolError.invalid("Enter a valid SSH port.") }

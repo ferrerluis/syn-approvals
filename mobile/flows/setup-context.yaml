@@ -1,0 +1,15 @@
+appId: org.syn-approvals.SynMobile.Debug
+---
+- runFlow: setup-ssh.yaml
+- tapOn:
+    id: "machine-host"
+- eraseText: 253
+- inputText: "not a hostname"
+- tapOn:
+    id: "check-host"
+- assertVisible: "Enter a reachable hostname and SSH port."
+- assertNotVisible:
+    id: "trust-host"
+- assertNotVisible:
+    id: "pair-machine"
+- takeScreenshot: "artifacts/setup-context-rejected.png"

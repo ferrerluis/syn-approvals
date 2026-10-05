@@ -56,3 +56,7 @@ npx --no-install agent-device test flows/setup-ssh.yaml --maestro --platform ios
 ```
 
 The native review fixture at `macos/Tests/SynTests/Fixtures/mobile-review.json` is consumed by both Swift and JavaScript tests. It checks display fields and redaction; it never authorizes an invocation. Signed wire verification continues to use the protocol-v2 golden vectors.
+
+Use `agent-device install` when updating a simulator app that has a paired identity. The local install check preserved the public device UUID. Do not use `reinstall` for pairing/update acceptance without first proving that its data-reset behavior is acceptable.
+
+`flows/setup-context.yaml` extends the SSH setup check with a rejected hostname. It verifies that a failed check removes the previous fingerprint and bootstrap controls. Supply the same `HOST` and independently verified `FINGERPRINT` variables as the setup flow.
