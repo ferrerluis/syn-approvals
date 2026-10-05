@@ -61,6 +61,8 @@ The native review fixture at `macos/Tests/SynTests/Fixtures/mobile-review.json` 
 
 Use `agent-device install` when updating a simulator app that has a paired identity. The local install check preserved the public device UUID. Do not use `reinstall` for pairing/update acceptance without first proving that its data-reset behavior is acceptable.
 
+`flows/review-pending.yaml` reviews a fresh `/usr/bin/true` request on an independently verified target. Start and retain the original sudo process, then run the flow with `TARGET_ID`, `SOURCE_USER`, `SOURCE_UID` and an absolute `SCREENSHOT` path. Check the original process exit status afterward; an empty request list alone is not approval evidence. Close a manual agent-device session before `test`, which creates its own simulator session.
+
 `flows/setup-context.yaml` extends the SSH setup check with a rejected hostname. It verifies that a failed check removes the previous fingerprint and bootstrap controls. Supply the same `HOST` and independently verified `FINGERPRINT` variables as the setup flow.
 
 ## Phone-led setup and updates

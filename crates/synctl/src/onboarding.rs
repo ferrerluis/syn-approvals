@@ -720,6 +720,9 @@ pub fn configure(operation_id: &str, apply: bool) -> Result<PairingReport> {
         "/usr/bin/systemctl",
         &["enable", "--now", "syn-agent.service"],
     )?;
+    // enable --now leaves an already-running relay on the old executable after
+    // package replacement. Load the installed release before pairing preflight.
+    run_quiet("/usr/bin/systemctl", &["restart", "syn-agent.service"])?;
     run_quiet(
         "/usr/bin/systemctl",
         &["is-active", "--quiet", "syn-agent.service"],

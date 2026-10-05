@@ -1,10 +1,25 @@
 appId: org.syn-approvals.SynMobile.Debug
 ---
-# Run only with a fresh harmless request pending on the real test target.
+# Only run for a fresh, harmless /usr/bin/true invocation on this verified target.
+# TARGET_ID, SOURCE_USER and SOURCE_UID must come from independent target checks.
+# Close any manual agent-device session before starting this flow.
 - launchApp
 - assertVisible: "Connected"
-- assertVisible: "/usr/bin/true"
+- extendedWaitUntil:
+    visible:
+      id: "request-${TARGET_ID}:.*"
+    timeout: 60000
+- scrollUntilVisible:
+    element:
+      id: "approve-${TARGET_ID}:.*"
+    direction: DOWN
+    timeout: 10000
+- assertVisible: 'Source user: "${SOURCE_USER}" \(UID ${SOURCE_UID}\)'
+- assertVisible: '"/usr/bin/true"'
 - assertVisible: "Approves this invocation only."
-- assertVisible: "Approve"
-- tapOn: "Approve"
-- assertVisible: "No pending requests"
+- takeScreenshot: "${SCREENSHOT}"
+- tapOn:
+    id: "approve-${TARGET_ID}:.*"
+- extendedWaitUntil:
+    visible: "No pending requests"
+    timeout: 10000

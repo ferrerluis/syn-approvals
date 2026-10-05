@@ -66,3 +66,15 @@ The new installer regressions reject unsupported commands/paths, partial or chan
 Host Rust tests: 111 passed (one platform-specific test ignored); macOS Swift: 150 passed; mobile: 5 state and 10 UI tests; native iOS: 20 tests passed after the profile-import adjustment. Formatting, host/ARM64 Clippy, TypeScript and Expo lint pass at the checked candidate stages. Exact non-development builds and live guest execution must still be completed for this installer candidate.
 
 Phone-led updates also accept signed preflight from a currently paired additional approver. Request binding, approval/denial key roles, required authentication class and expiry remain enforced; installer evidence is checked against the current trust set. The returned signer ID identifies the device that actually approved.
+
+## Native phone-first ARM64 milestone
+
+At `f468fcd0bcd96ec5936d4e3c797a5a95154f02c9`, release `20261005184947`, the Expo Debug simulator completed the native phone-led installation on the isolated Ubuntu 26.04 ARM64 VM. Two separate signed setup requests were approved and operation `e59cdcc66f86460e882c55310336be7f` reached `complete`. The simulator uses explicitly granted development keys; this does not verify hardware Secure Enclave behavior.
+
+The first matching-release update exposed a stale relay process: its executable SHA-256 differed from the installed executable. The app rejected its older release handshake. A diagnostic relay-only restart through independent root SSH restored Connected; the following native setup retry completed. Configuration now explicitly restarts the relay after installing/configuring its package; a subsequent automatic update must verify this fix before real-Pi deployment.
+
+Local pinned agent-device Maestro-compatible flows verified the target/user, `/usr/bin/true`, per-invocation scope and Approve. The original `/usr/bin/sudo -n /usr/bin/true` under UID 1000 exited zero for PID 40337 (17.755 seconds) and a fresh repeat PID 40447 (13.715 seconds), each after a separate simulator approval. Earlier manual attempts expired and exited 1; no late success was reported. These are actual sudo invocations on the isolated VM, not the real Pi.
+
+Local screenshots: `mobile/artifacts/07-phone-setup-approval.png`, `08-phone-final-approval.png`, `09-phone-setup-complete.png`, `11-arm64-original-sudo-flow.png`, and `12-arm64-repeat-sudo-flow.png`. Public exact process receipts are retained under `/private/tmp/syn-expo-arm64-vm/`; native ARM64 workspace tests passed 130 tests, followed by both read-only protected-target checks. Current host Rust tests pass 112 tests, macOS Swift 150, and native iOS 24, with the shared setup-probe golden and required Clippy checks passing.
+
+Original sudo success/repeat, automatic update/rollback, live failure cases and Mac pairing on the real Pi remain required. The real Pi still runs `20260921060301`; no Expo implementation changes have been applied there.
