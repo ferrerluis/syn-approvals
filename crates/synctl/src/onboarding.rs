@@ -715,7 +715,6 @@ pub fn configure(operation_id: &str, apply: bool) -> Result<PairingReport> {
     )?;
     configure_identities(&request)?;
     configure_target(&request, journal.managed_uid)?;
-    crate::approvers::configure_mobile(&request)?;
     run_quiet(
         "/usr/bin/systemctl",
         &["enable", "--now", "syn-agent.service"],
@@ -727,6 +726,9 @@ pub fn configure(operation_id: &str, apply: bool) -> Result<PairingReport> {
         "/usr/bin/systemctl",
         &["is-active", "--quiet", "syn-agent.service"],
     )?;
+    // Additional enrollment restarts and verifies the relay. Start the
+    // preserved primary pairing first so a stopped relay can accept the phone.
+    crate::approvers::configure_mobile(&request)?;
     let target = live_profile(&request)?;
     journal.phase = "paired_pending_approval".into();
     write_journal(&operation, &journal)?;
