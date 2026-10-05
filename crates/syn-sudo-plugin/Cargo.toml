@@ -21,5 +21,6 @@ zeroize.workspace = true
 socket2.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 hex.workspace = true
 serde_json.workspace = true

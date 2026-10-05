@@ -1,3 +1,4 @@
+mod approvers;
 mod installer;
 mod maintenance;
 mod onboarding;
@@ -39,6 +40,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum TopLevel {
+    /// Enroll or revoke additional separately authenticated approval devices.
+    Approvers {
+        #[command(subcommand)]
+        command: ApproversCommand,
+    },
     /// Check platform, configuration, provider, service, and recovery state.
     Doctor(ConfigPaths),
     /// Show the configured target without exposing secrets.
@@ -90,6 +96,41 @@ enum TopLevel {
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ApproversCommand {
+    Authorize {
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        public_key: String,
+        #[arg(long)]
+        allow_development: bool,
+        #[arg(long)]
+        apply: bool,
+    },
+    Serve {
+        #[arg(long)]
+        device_id: String,
+    },
+    List,
+    Enroll {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        sha256: String,
+        #[arg(long)]
+        allow_development: bool,
+        #[arg(long)]
+        apply: bool,
+    },
+    Revoke {
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        apply: bool,
     },
 }
 
@@ -415,6 +456,34 @@ fn main() {
 
 fn run(cli: &Cli) -> Result<()> {
     match &cli.command {
+        TopLevel::Approvers { command } => match command {
+            ApproversCommand::Authorize {
+                device_id,
+                public_key,
+                allow_development,
+                apply,
+            } => {
+                let result = approvers::authorize(device_id, public_key, *apply)?;
+                if *apply && *allow_development {
+                    approvers::allow_development(device_id)?;
+                }
+                output(cli.json, result)
+            }
+            ApproversCommand::Serve { device_id } => approvers::serve(device_id),
+            ApproversCommand::List => output(cli.json, approvers::list()?),
+            ApproversCommand::Enroll {
+                input,
+                sha256,
+                allow_development,
+                apply,
+            } => output(
+                cli.json,
+                approvers::enroll(input, sha256, *allow_development, *apply)?,
+            ),
+            ApproversCommand::Revoke { device_id, apply } => {
+                output(cli.json, approvers::revoke(device_id, *apply)?)
+            }
+        },
         TopLevel::Doctor(paths) => output(cli.json, doctor(paths)?),
         TopLevel::Status(paths) => output(cli.json, status(paths)?),
         TopLevel::Keys { command } => match command {
@@ -567,6 +636,7 @@ fn run(cli: &Cli) -> Result<()> {
                     recovery_timer::cancel(true)?;
                 }
                 verify_local_sudo_recovered(&arguments.state)?;
+                approvers::revoke_all_mobile_keys()?;
                 if Path::new("/var/lib/syn/maintenance/config.json").try_exists()? {
                     maintenance::revoke(true)?;
                 }

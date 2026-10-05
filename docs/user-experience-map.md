@@ -85,7 +85,7 @@ flowchart TD
     notify["Mac · Syn approval requested<br/>Notification identifies the remote machine and user"]
     review["Review<br/>Check the account, action, arguments and time left"]
     choice{"Your choice"}
-    auth["Approve once<br/>Touch ID or Mac login password"]
+    auth["Approve<br/>Touch ID or Mac login password"]
     run["Remote machine · This task continues once<br/>The next request needs a new approval"]
     deny["Remote machine · Request denied<br/>No password fallback for this invocation"]
     timeout["90 seconds pass without a decision"]
@@ -116,7 +116,7 @@ flowchart TD
 | Private notification preview | The alert shows the target and requesting user, not command contents. **Review** opens the request; approval is not available directly from the notification. |
 | Action review | See which remote machine, who requested it, which account it will run as, the working folder, the executable, and each argument separately. Environment variable names are visible, not their values. |
 | Extra scrutiny | Inspect the target fingerprint, warnings and countdown. Possible secret-bearing arguments are initially masked; **Reveal** lets you inspect them. |
-| One-use approval | **Approve once** requests fresh system authentication. The Mac login password is an intentional alternative to Touch ID—not the Ubuntu password. |
+| One-use approval | **Approve** requests fresh system authentication. The Mac login password is an intentional alternative to Touch ID—not the Ubuntu password. |
 | Quick rejection | **Deny** needs no fingerprint. Once the remote machine receives the denial, that invocation cannot switch to password fallback. |
 | Several requests | Today, review each pending request separately. Time-limited **Always approve** is proposed in TODO 2, not available in this build. |
 

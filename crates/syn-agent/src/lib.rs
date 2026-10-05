@@ -1,3 +1,4 @@
+mod notifications;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -14,7 +15,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use serde::Deserialize;
-use syn_config::AgentConfig;
+use sha2::{Digest, Sha256};
+use syn_config::{approvers::ApproverRegistry, AgentConfig};
 use syn_protocol::message_kind;
 use syn_protocol::{
     encode_canonical, verify_decision, verify_request, AuthenticationClass, CancelV1,
@@ -54,13 +56,26 @@ pub struct Agent {
     tls_acceptor: TlsAcceptor,
 }
 
+#[derive(Clone)]
+struct BoundApprover {
+    device_id: String,
+    certificate_fingerprint: [u8; 32],
+    approval_key: VerifyingKey,
+    denial_key: VerifyingKey,
+}
+
 struct AgentState {
     target_id: String,
     target_key: VerifyingKey,
+    #[cfg(test)]
     approval_key: VerifyingKey,
+    #[cfg(test)]
     denial_key: VerifyingKey,
+    notifications: Option<notifications::Notifications>,
+    approvers: Vec<BoundApprover>,
     max_pending: usize,
     pending: Mutex<HashMap<String, PendingRequest>>,
+    resolved: Mutex<HashMap<String, ([u8; 32], Instant)>>,
     event_tx: broadcast::Sender<WireMessageV1>,
 }
 
@@ -83,16 +98,67 @@ impl Agent {
         let target_key = read_verifying_key(&config.target_public_key)?;
         let approval_key = read_verifying_key(&config.approval_public_key)?;
         let denial_key = read_verifying_key(&config.denial_public_key)?;
+        let mut approvers = vec![BoundApprover {
+            device_id: "mac-primary".into(),
+            certificate_fingerprint: Sha256::digest(
+                load_certificates(&config.client_ca_certificate)?[0].as_ref(),
+            )
+            .into(),
+            approval_key,
+            denial_key,
+        }];
+        if let Some(path) = &config.approver_registry {
+            let registry = ApproverRegistry::load(path)?;
+            for record in &registry.approvers {
+                let (approval_key, denial_key) = record.keys()?;
+                let fingerprint = record.certificate_fingerprint()?;
+                if approvers.iter().any(|peer| {
+                    peer.certificate_fingerprint == fingerprint
+                        || peer.approval_key == approval_key
+                        || peer.denial_key == approval_key
+                        || peer.approval_key == denial_key
+                        || peer.denial_key == denial_key
+                }) {
+                    bail!("additional approver collides with an existing identity");
+                }
+                approvers.push(BoundApprover {
+                    device_id: record.device_id.clone(),
+                    certificate_fingerprint: fingerprint,
+                    approval_key,
+                    denial_key,
+                });
+            }
+        }
         let tls_acceptor = TlsAcceptor::from(Arc::new(load_tls_config(&config)?));
+        let notifications = config
+            .apns
+            .clone()
+            .and_then(|config| {
+                notifications::Notifications::start(
+                    config,
+                    &approvers
+                        .iter()
+                        .skip(1)
+                        .map(|p| p.device_id.clone())
+                        .collect::<Vec<_>>(),
+                ).map_err(|_| {
+                    tracing::warn!("Apple notifications are unavailable; direct approval transport remains available");
+                }).ok()
+            });
         let (event_tx, _) = broadcast::channel(REQUEST_BROADCAST_CAPACITY);
         Ok(Self {
             state: Arc::new(AgentState {
                 target_id: config.target_id.clone(),
                 target_key,
+                #[cfg(test)]
                 approval_key,
+                #[cfg(test)]
                 denial_key,
+                notifications,
+                approvers,
                 max_pending: config.max_pending,
                 pending: Mutex::new(HashMap::new()),
+                resolved: Mutex::new(HashMap::new()),
                 event_tx,
             }),
             config,
@@ -295,6 +361,15 @@ async fn handle_local(
     }
     let request_event = WireMessageV1::new(message_kind::REQUEST, message.body.to_vec())?;
     let _ = state.event_tx.send(request_event);
+    if let Some(notifications) = &state.notifications {
+        // Expiry only: no command fields enter the notification worker.
+        let request =
+            syn_protocol::verify_request(message.body.as_slice(), &state.target_key)?.request;
+        let expiry = (request.issued_at_unix_ms + i64::from(request.ttl_ms)) / 1000;
+        if let Ok(expiry) = u64::try_from(expiry) {
+            notifications.notify(expiry);
+        }
+    }
 
     enum LocalOutcome {
         Decision(Vec<u8>),
@@ -383,6 +458,19 @@ async fn handle_network(
         .await
         .context("mutual TLS timed out")?
         .context("mutual TLS failed")?;
+    let leaf = tls
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .context("missing approver TLS identity")?;
+    let fingerprint: [u8; 32] = Sha256::digest(leaf.as_ref()).into();
+    let peer = state
+        .approvers
+        .iter()
+        .find(|peer| peer.certificate_fingerprint == fingerprint)
+        .cloned()
+        .context("TLS certificate is not bound to an enrolled approver")?;
     let config = WebSocketConfig::default()
         .max_message_size(Some(MAX_WIRE_BYTES))
         .max_frame_size(Some(MAX_WIRE_BYTES));
@@ -422,6 +510,7 @@ async fn handle_network(
         bail!("approver and target protocol, identity, or release do not match");
     }
 
+    let mut event_rx = state.event_tx.subscribe();
     let snapshot: Vec<Vec<u8>> = {
         let pending = state.pending.lock().await;
         pending
@@ -438,7 +527,6 @@ async fn handle_network(
         .await?;
     }
 
-    let mut event_rx = state.event_tx.subscribe();
     loop {
         tokio::select! {
             incoming = websocket.next() => {
@@ -463,10 +551,13 @@ async fn handle_network(
                         };
                         match message.kind {
                             message_kind::DECISION => {
-                                if let Err(error) = route_decision(message.body.as_slice(), &state).await {
-                                    hard_fail_pending(&state).await;
+                                if let Err(error) = route_bound_decision(message.body.as_slice(), &state, &peer).await {
+                                    if !error.is::<ResolvedDecision>() { hard_fail_pending(&state).await; }
                                     return Err(error);
                                 }
+                            },
+                            message_kind::NOTIFICATION_REGISTRATION => {
+                                register_notifications(message.body.as_slice(), &state, &peer).await?;
                             },
                             message_kind::PING => send_wire(&mut websocket, WireMessageV1::new(message_kind::PONG, message.body.to_vec())?).await?,
                             _ => {
@@ -496,6 +587,40 @@ async fn handle_network(
     Ok(())
 }
 
+async fn register_notifications(
+    signed_body: &[u8],
+    state: &AgentState,
+    peer: &BoundApprover,
+) -> Result<()> {
+    let registration = (|| -> Result<syn_protocol::NotificationRegistrationV1> {
+        if peer.device_id == "mac-primary" {
+            bail!("legacy Mac identity cannot register mobile push");
+        }
+        let registration: syn_protocol::NotificationRegistrationV1 =
+            syn_protocol::decode_canonical(signed_body)?;
+        registration.validate()?;
+        Ok(registration)
+    })();
+    let registration = match registration {
+        Ok(registration) => registration,
+        Err(error) => {
+            hard_fail_pending(state).await;
+            return Err(error);
+        }
+    };
+    if let Some(notifications) = &state.notifications {
+        if notifications
+            .register(&peer.device_id, registration)
+            .await
+            .is_err()
+        {
+            // Notification availability never changes authorization or exposes a token in logs.
+            tracing::warn!("Apple notification registration was not saved");
+        }
+    }
+    Ok(())
+}
+
 fn websocket_error_is_integrity_failure(error: &tokio_tungstenite::tungstenite::Error) -> bool {
     use tokio_tungstenite::tungstenite::Error;
     !matches!(
@@ -504,12 +629,27 @@ fn websocket_error_is_integrity_failure(error: &tokio_tungstenite::tungstenite::
     )
 }
 
+#[cfg(test)]
 async fn route_decision(signed: &[u8], state: &AgentState) -> Result<()> {
-    let verified = match verify_decision(signed, &state.approval_key) {
-        Ok(decision) => decision,
-        Err(_) => verify_decision(signed, &state.denial_key)?,
+    let peer = BoundApprover {
+        device_id: "mac-primary".into(),
+        certificate_fingerprint: [0; 32],
+        approval_key: state.approval_key,
+        denial_key: state.denial_key,
     };
-    validate_decision_key_class(&verified, state)?;
+    route_bound_decision(signed, state, &peer).await
+}
+
+async fn route_bound_decision(
+    signed: &[u8],
+    state: &AgentState,
+    peer: &BoundApprover,
+) -> Result<()> {
+    let verified = match verify_decision(signed, &peer.approval_key) {
+        Ok(decision) => decision,
+        Err(_) => verify_decision(signed, &peer.denial_key)?,
+    };
+    validate_decision_key_class(&verified, peer)?;
     if verified.decision.release_id != syn_protocol::release_id()
         || verified.decision.release_commit != syn_protocol::release_commit()
     {
@@ -519,6 +659,14 @@ async fn route_decision(signed: &[u8], state: &AgentState) -> Result<()> {
     let pending = {
         let mut requests = state.pending.lock().await;
         let Some(request) = requests.get(&request_id) else {
+            let resolved = state.resolved.lock().await;
+            if resolved.get(&request_id).is_some_and(|(hash, expiry)| {
+                *expiry > Instant::now()
+                    && verified.decision.request_payload_hash.as_slice() == hash
+                    && verified.decision.target_id == state.target_id
+            }) {
+                return Err(ResolvedDecision.into());
+            }
             bail!("decision does not match a pending request");
         };
         if !decision_is_timely(request.deadline, Instant::now())
@@ -526,14 +674,41 @@ async fn route_decision(signed: &[u8], state: &AgentState) -> Result<()> {
         {
             bail!("decision is late or request binding does not match");
         }
+        remember_resolved(state, &request_id, request).await;
         requests
             .remove(&request_id)
             .context("pending request disappeared before routing")?
     };
+    broadcast_cancel(state, pending.verified.request.request_id.as_slice()).await?;
     pending
         .response_tx
         .send(LocalResponse::Decision(signed.to_vec()))
         .map_err(|_| anyhow!("requesting sudo process disconnected"))
+}
+
+#[derive(Debug)]
+struct ResolvedDecision;
+impl std::fmt::Display for ResolvedDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request already completed; decision rejected")
+    }
+}
+impl std::error::Error for ResolvedDecision {}
+
+// Terminal hashes are bookkeeping, never reusable approvals. No argv is retained.
+async fn remember_resolved(state: &AgentState, id: &str, request: &PendingRequest) {
+    let mut resolved = state.resolved.lock().await;
+    resolved.retain(|_, (_, expiry)| *expiry > Instant::now());
+    if resolved.len() >= 256 {
+        if let Some(oldest) = resolved
+            .iter()
+            .min_by_key(|(_, (_, expiry))| *expiry)
+            .map(|(id, _)| id.clone())
+        {
+            resolved.remove(&oldest);
+        }
+    }
+    resolved.insert(id.into(), (request.verified.payload_hash, request.deadline));
 }
 
 fn decision_is_timely(deadline: Instant, now: Instant) -> bool {
@@ -553,16 +728,16 @@ async fn hard_fail_pending(state: &AgentState) {
     }
 }
 
-fn validate_decision_key_class(decision: &VerifiedDecision, state: &AgentState) -> Result<()> {
+fn validate_decision_key_class(decision: &VerifiedDecision, peer: &BoundApprover) -> Result<()> {
     let expected = match (
         decision.decision.action,
         decision.decision.authentication_class,
     ) {
         (DecisionAction::ApproveOnce, AuthenticationClass::SystemUserPresence) => {
-            syn_protocol::key_id(&state.approval_key)
+            syn_protocol::key_id(&peer.approval_key)
         }
         (DecisionAction::Deny, AuthenticationClass::DeviceAuthenticated) => {
-            syn_protocol::key_id(&state.denial_key)
+            syn_protocol::key_id(&peer.denial_key)
         }
         _ => bail!("decision authentication class is invalid"),
     };
@@ -614,6 +789,11 @@ fn load_tls_config(config: &AgentConfig) -> Result<ServerConfig> {
     let mut roots = RootCertStore::empty();
     for certificate in load_certificates(&config.client_ca_certificate)? {
         roots.add(certificate)?;
+    }
+    if let Some(path) = &config.approver_registry {
+        for record in ApproverRegistry::load(path)?.approvers {
+            roots.add(CertificateDer::from(record.certificate_der()?))?;
+        }
     }
     let client_verifier = WebPkiClientVerifier::builder(Arc::new(roots)).build()?;
     let mut tls = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -724,6 +904,8 @@ mod tests {
             target_key: *target.verifying_key(),
             approval_key: *approval.verifying_key(),
             denial_key: *denial.verifying_key(),
+            approvers: vec![],
+            notifications: None,
             max_pending: 4,
             pending: Mutex::new(HashMap::from([(
                 hex::encode(verified.request.request_id.as_slice()),
@@ -735,9 +917,79 @@ mod tests {
                     response_tx,
                 },
             )])),
+            resolved: Mutex::new(HashMap::new()),
             event_tx,
         });
         (state, verified, approval, response_rx)
+    }
+
+    #[tokio::test]
+    async fn tls_and_notification_clients_use_one_compiled_crypto_provider() {
+        // An added HTTP dependency must not make rustls's default provider ambiguous.
+        let _ = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13]);
+        reqwest::Client::builder()
+            .https_only(true)
+            .no_proxy()
+            .build()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_or_unauthorized_notification_registration_hard_fails_waiters() {
+        for case in ["cbor", "schema", "token", "environment", "legacy"] {
+            let (state, _request, approval, receiver) = state_with_pending().await;
+            let peer = BoundApprover {
+                device_id: if case == "legacy" {
+                    "mac-primary"
+                } else {
+                    "phone"
+                }
+                .into(),
+                certificate_fingerprint: [1; 32],
+                approval_key: *approval.verifying_key(),
+                denial_key: state.denial_key,
+            };
+            let registration = syn_protocol::NotificationRegistrationV1 {
+                schema_version: if case == "schema" { 2 } else { 1 },
+                token: if case == "token" { vec![] } else { vec![1; 32] }.into(),
+                environment: if case == "environment" {
+                    "invalid"
+                } else {
+                    "development"
+                }
+                .into(),
+            };
+            let body = if case == "cbor" {
+                vec![0xff]
+            } else {
+                encode_canonical(&registration).unwrap()
+            };
+            assert!(register_notifications(&body, &state, &peer).await.is_err());
+            assert!(matches!(
+                receiver.await.unwrap(),
+                LocalResponse::IntegrityFailure
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_push_keeps_a_valid_direct_connection_and_request() {
+        let (state, _request, approval, _receiver) = state_with_pending().await;
+        let peer = BoundApprover {
+            device_id: "phone".into(),
+            certificate_fingerprint: [1; 32],
+            approval_key: *approval.verifying_key(),
+            denial_key: state.denial_key,
+        };
+        let registration = syn_protocol::NotificationRegistrationV1 {
+            schema_version: 1,
+            token: vec![1; 32].into(),
+            environment: "development".into(),
+        };
+        register_notifications(&encode_canonical(&registration).unwrap(), &state, &peer)
+            .await
+            .unwrap();
+        assert_eq!(state.pending.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -771,8 +1023,11 @@ mod tests {
             target_key: *target.verifying_key(),
             approval_key: *generate_signing_key().verifying_key(),
             denial_key: *generate_signing_key().verifying_key(),
+            approvers: vec![],
+            notifications: None,
             max_pending: 4,
             pending: Mutex::new(HashMap::new()),
+            resolved: Mutex::new(HashMap::new()),
             event_tx,
         });
         let (server, mut client) = UnixStream::pair().unwrap();
@@ -808,8 +1063,11 @@ mod tests {
                 target_key: *target.verifying_key(),
                 approval_key: *approver.verifying_key(),
                 denial_key: *generate_signing_key().verifying_key(),
+                approvers: vec![],
+                notifications: None,
                 max_pending: 4,
                 pending: Mutex::new(HashMap::new()),
+                resolved: Mutex::new(HashMap::new()),
                 event_tx,
             });
             let mut request =
@@ -972,5 +1230,58 @@ mod tests {
             LocalResponse::IntegrityFailure
         ));
         assert!(state.pending.lock().await.is_empty());
+    }
+    #[tokio::test]
+    async fn a_second_paired_device_cannot_reuse_the_first_devices_decision() {
+        let (state, request, approval, receiver) = state_with_pending().await;
+        let second = generate_signing_key();
+        let peer = BoundApprover {
+            device_id: "second".into(),
+            certificate_fingerprint: [1; 32],
+            approval_key: *second.verifying_key(),
+            denial_key: *generate_signing_key().verifying_key(),
+        };
+        let first_decision = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            approval.verifying_key(),
+        );
+        let bytes = sign_decision(&first_decision, &approval).unwrap();
+        assert!(route_bound_decision(&bytes, &state, &peer).await.is_err());
+        assert_eq!(state.pending.lock().await.len(), 1);
+        let second_decision = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            second.verifying_key(),
+        );
+        let bytes = sign_decision(&second_decision, &second).unwrap();
+        route_bound_decision(&bytes, &state, &peer).await.unwrap();
+        assert!(matches!(
+            receiver.await.unwrap(),
+            LocalResponse::Decision(_)
+        ));
+    }
+    #[tokio::test]
+    async fn competing_valid_response_is_rejected_as_completed_and_broadcasts_cancel() {
+        let (state, request, approval, receiver) = state_with_pending().await;
+        let mut events = state.event_tx.subscribe();
+        let decision = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            approval.verifying_key(),
+        );
+        let bytes = sign_decision(&decision, &approval).unwrap();
+        route_decision(&bytes, &state).await.unwrap();
+        let event = events.recv().await.unwrap();
+        assert_eq!(event.kind, message_kind::CANCEL);
+        assert!(matches!(
+            receiver.await.unwrap(),
+            LocalResponse::Decision(_)
+        ));
+        let error = route_decision(&bytes, &state).await.unwrap_err();
+        assert!(error.is::<ResolvedDecision>());
     }
 }

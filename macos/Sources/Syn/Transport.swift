@@ -62,9 +62,12 @@ final class TargetConnection {
         }
         let identity: SecIdentity
         do {
-            guard let resolved = try MacTransportIdentityBackend.connectionIdentity(
-                label: target.clientIdentityLabel
-            ) else {
+            #if os(iOS)
+            let resolvedIdentity = try IOSTransportIdentityStore.connectionIdentity(label: target.clientIdentityLabel)
+            #else
+            let resolvedIdentity = try MacTransportIdentityBackend.connectionIdentity(label: target.clientIdentityLabel)
+            #endif
+            guard let resolved = resolvedIdentity else {
                 onMessage(.failure(TransportError.missingClientIdentity(target.clientIdentityLabel)))
                 return
             }

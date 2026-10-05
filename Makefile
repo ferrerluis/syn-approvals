@@ -36,6 +36,8 @@ package-deb:
 
 verify-fixtures:
 	cmp tests/fixtures/protocol-v1.json macos/Tests/SynTests/Fixtures/protocol-v1.json
+	cmp tests/fixtures/protocol-v2.json macos/Tests/SynTests/Fixtures/protocol-v2.json
+	cmp tests/fixtures/notification-registration-v1.json macos/Tests/SynTests/Fixtures/notification-registration-v1.json
 
 clean:
 	$(CARGO) clean

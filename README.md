@@ -4,7 +4,7 @@
 
 **Approve each remote `sudo` request from your Mac.**
 
-If an agent working on your Ubuntu machine needs `sudo` to install a package, Syn pauses that request and shows it on your Mac. You can review the machine, account, executable, and arguments, then choose **Approve once** with Touch ID or your Mac login password, or choose **Deny**. Syn also works for commands you start yourself: it gates eligible invocations by one configured account after normal sudo policy, without trying to tell a human from an agent.
+If an agent working on your Ubuntu machine needs `sudo` to install a package, Syn pauses that request and shows it on your Mac. You can review the machine, account, executable, and arguments, then choose **Approve** with Touch ID or your Mac login password, or choose **Deny**. Syn also works for commands you start yourself: it gates eligible invocations by one configured account after normal sudo policy, without trying to tell a human from an agent.
 
 ## Watch Syn in action
 
@@ -26,10 +26,14 @@ The video uses fictional machine and command details to illustrate an approval.
 1. [Download the latest experimental Mac ZIP](https://github.com/ferrerluis/syn-approvals/releases/latest/download/Syn-macOS-latest-experimental.zip), open it, and move **Syn.app** into **Applications**. The current ad-hoc-signed build may require macOS's per-app **Open Anyway** confirmation in **System Settings → Privacy & Security**; do not disable Gatekeeper or other system-wide protections.
 2. Open Syn and choose whether it starts at login. Select **Add a machine**, enter the reachable hostname, SSH account, and optional SSH port, then click **Check connection**. If Syn shows SSH host fingerprints, compare them with a trusted source before clicking **Trust this host**.
 3. Click **Install or update Syn**. On first setup, Syn displays one command. Run it in the trusted administrator terminal on the remote machine, then click **I've run the command — continue** on the Mac. Enter any administrator password only in that remote terminal; Syn does not collect or send it.
-4. Follow the Mac's two distinct setup approval requests: one before sudo changes, and a fresh one to verify the installed release. Choose **Approve once** for each only after reviewing it. Wait for setup to report installed and the machine to show **Connected**.
-5. From a normal terminal on the remote host, as the configured account, run `/usr/bin/sudo -n /usr/bin/true`. It makes no administrative change. Review the request on your Mac and choose **Approve once**; the command should exit successfully. A nested agent sandbox may block sudo before Syn runs, so use a host terminal for this check.
+4. Follow the Mac's two distinct setup approval requests: one before sudo changes, and a fresh one to verify the installed release. Choose **Approve** for each only after reviewing it. Wait for setup to report installed and the machine to show **Connected**.
+5. From a normal terminal on the remote host, as the configured account, run `/usr/bin/sudo -n /usr/bin/true`. It makes no administrative change. Review the request on your Mac and choose **Approve**; the command should exit successfully. A nested agent sandbox may block sudo before Syn runs, so use a host terminal for this check.
 
 The Mac ZIP already contains the matching remote source and helper; there is no separate Ubuntu installer to download. If setup fails, keep recovery access and see [recovery](docs/recovery.md).
+
+## iPhone candidate
+
+An iPhone app is being developed in [`ios`](ios/README.md). It shares request verification and one-invocation signing with the Mac app, connects directly to the machine, and can receive generic Apple push alerts sent by that machine. The simulator approval flow has been visually exercised; real Pi approval and real background notification delivery are still acceptance gates. This candidate does not yet provide the Mac app's complete clean-install/update workflow.
 
 ## What an approval looks like
 
@@ -37,7 +41,7 @@ Syn shows the remote machine, source account, executable, arguments, and time re
 
 | Your choice or situation | What happens on the remote machine |
 | --- | --- |
-| **Approve once** | The signed approval lets that invocation proceed once. |
+| **Approve** | The signed approval lets that invocation proceed once. |
 | **Deny** | A signed denial received by the remote machine stops the invocation without password fallback. If the Mac cannot confirm delivery, check the original remote terminal; it may still offer password fallback after timeout. |
 | Press Enter while an interactive request is pending | Syn cancels the request and opens the machine's normal password prompt immediately. |
 | No Mac decision within 90 seconds | An interactive terminal may offer the normal password prompt. Unanswered non-interactive `sudo` fails without a prompt; it can still succeed if approved on the Mac. |

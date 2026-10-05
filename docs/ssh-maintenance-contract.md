@@ -67,3 +67,14 @@ Recovery removes NOPASSWD first. A root-owned worker lease and process identity 
 ## Acceptance
 
 Unit tests cover token injection, key shape, unsafe files, copied-byte substitution, SSH identity isolation, secret-free setup, phase failures and recovery ordering. The dedicated E2E session must run all [12 cases](onboarding-e2e-test-plan.md), including trusted bootstrap, rejected unrestricted SSH commands, key revocation, update without password transfer, and final clean reinstall. Component results do not count as live acceptance.
+
+## Additional iPhone pairing candidate
+
+A separate `synctl approvers authorize` command records one canonical Ed25519 key and device UUID. Its root authorized-key entry uses `restrict` and the fixed forced command `/usr/bin/synctl --json approvers serve --device-id UUID`.
+
+The serve endpoint recognizes only these exact `SSH_ORIGINAL_COMMAND` strings:
+
+- `syn-mobile --protocol-version 1 enroll`: bounded JSON public enrollment on stdin, bound to the authorized UUID; replacing existing different identities requires root revocation first.
+- `syn-mobile --protocol-version 1 profile`: read that enrolled device's public target profile.
+
+The endpoint rejects every other request. No command-execution or file-transfer API is available. Device revocation removes its root trust record and exact recorded SSH key entry, preserving unrelated administrator keys. Development signing needs a separate explicit root authorization.

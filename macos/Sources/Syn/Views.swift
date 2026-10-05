@@ -160,7 +160,7 @@ private struct ApprovalDetailView: View {
                     HStack {
                         Button("Deny", role: .destructive) { Task { await model.deny(request.id) } }
                         Spacer()
-                        Button("Approve once") { Task { await model.approve(request.id) } }
+                        Button("Approve") { Task { await model.approve(request.id) } }
                             .buttonStyle(.borderedProminent)
                             .disabled(timeline.date >= request.expiresAt || model.authenticatingRequests.contains(request.id))
                     }

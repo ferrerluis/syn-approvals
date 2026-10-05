@@ -10,7 +10,7 @@ enum KeyStoreError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .keychain(status): "Keychain operation failed (\(status))"
-        case .secureEnclaveUnavailable: "Secure Enclave is unavailable on this Mac"
+        case .secureEnclaveUnavailable: "Secure Enclave is unavailable on this device"
         }
     }
 }

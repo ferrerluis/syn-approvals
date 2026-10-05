@@ -128,3 +128,19 @@ A complete decision is signature- and binding-checked before expiry handling. Tr
 - The current hello requires exactly version 2; it does not negotiate with version 1.
 - The Mac and all remote binaries must share the exact release ID and commit before approvals resume.
 - There is no dynamic schema or renderer download.
+
+## Additional devices and generic notification registration
+
+Each root-owned additional approver record binds one client TLS leaf certificate to that device's separate approval and denial public keys. The relay checks the signed decision against the keys bound to the authenticated TLS peer. The sudo plug-in independently checks the current trusted registry and all existing request/action/authentication-class/deadline/release rules. Legacy primary Mac pairing remains supported. Duplicate device IDs, signing keys, or client certificates are rejected.
+
+The first valid decision resolves one invocation. The relay broadcasts its existing `CANCEL` message to remove the request from other apps. Bounded terminal request hashes distinguish a legitimate competing response from malformed input; they never authorize another invocation.
+
+Envelope kind **10** is `NOTIFICATION_REGISTRATION`. Its canonical CBOR body is:
+
+| Key | Field | Type |
+| --- | --- | --- |
+| 0 | registration schema | unsigned, exactly 1 |
+| 1 | APNs token | byte string, 1–256 bytes |
+| 2 | APNs environment | text, `development` or `production` |
+
+Registration is accepted only after the existing target/release hello on an authenticated additional-device TLS connection. The server binds it to that peer's enrolled device ID. It confers notification routing only. The shared `notification-registration-v1.json` vector fixes both body and envelope bytes across Rust and Swift. All components still require the same compiled release, including when the envelope set grows.

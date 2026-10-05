@@ -10,7 +10,7 @@ enum SynProtocolError: Error, LocalizedError {
 }
 
 enum SynMessageKind: UInt8, Sendable {
-    case hello = 1, request = 2, cancel = 3, decision = 4, result = 5, ping = 6, pong = 7, error = 8, unavailable = 9
+    case hello = 1, request = 2, cancel = 3, decision = 4, result = 5, ping = 6, pong = 7, error = 8, unavailable = 9, notificationRegistration = 10
 }
 
 struct WireMessage: Sendable {
@@ -121,7 +121,7 @@ enum SynProtocol {
         }
         guard map[3]?.textValue == release.id,
               map[4]?.textValue == release.commit else {
-            throw SynProtocolError.invalid("Update required: remote and Mac releases do not match")
+            throw SynProtocolError.invalid("Update required: remote and app releases do not match")
         }
     }
 
@@ -148,7 +148,7 @@ enum SynProtocol {
         else { throw SynProtocolError.invalid("invalid approval request") }
         let localRelease = try currentReleaseIdentity()
         guard releaseID == localRelease.id, releaseCommit == localRelease.commit else {
-            throw SynProtocolError.invalid("Update required: remote and Mac releases do not match")
+            throw SynProtocolError.invalid("Update required: remote and app releases do not match")
         }
         let sudo = try parseSudo(sudoValue)
         let issuedAt = Date(timeIntervalSince1970: Double(issuedRaw) / 1_000)
@@ -212,7 +212,12 @@ enum SynProtocol {
         let identity = ReleaseIdentity.current
 #if DEBUG
         if identity.releaseID == ReleaseIdentity.developmentID {
-            guard identity.commit == "development" else {
+            #if targetEnvironment(simulator)
+            let developmentIdentity = identity.commit == "development" || identity.commit == developmentCommit
+            #else
+            let developmentIdentity = identity.commit == "development"
+            #endif
+            guard developmentIdentity else {
                 throw SynProtocolError.invalid("Invalid app release metadata")
             }
             return (identity.releaseID, developmentCommit)

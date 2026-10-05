@@ -74,3 +74,13 @@ Syn blocks obvious interactive root shells and interpreters as an accident guard
 - Full command text already recorded by the host's existing sudo logging policy.
 - Mac sleep prevents direct notification delivery because the alpha has no APNs relay.
 - Denial of service at every non-root transport boundary.
+
+## iPhone candidate trust boundaries
+
+An additional iPhone is enrolled by a root-authorized administrator, with an independently checked SSH host key, its own TLS certificate, and separate signing keys. TLS authentication is bound to that device's signing identity; an authenticated device cannot relay a different approver's decision. Enrollment is immutable until revoked, and collisions with the primary Mac or another device are rejected. Root-owned registry trust is enforced independently in the sudo plug-in, not delegated to the unprivileged relay.
+
+The iPhone's SSH key permits only enrollment of its own device ID and retrieval of its public target profile. A forced command and restricted authorized-key options prohibit ordinary SSH command execution and forwarding. Uninstall removes only Syn-recorded mobile maintenance keys. This candidate has not yet been validated through a real privileged Pi installation/recovery round trip.
+
+Apple push is an optional notification channel. Device tokens and a separate provider key route generic alerts; they are never approval credentials. The target command, argv, environment digest, nonce, request ID, and signed messages stay off APNs. Notification content is untrusted and can only trigger a direct reconnect. Signing and request verification happen after the direct pinned connection, within the original request lifetime.
+
+Production iPhone approval keys remain Secure Enclave keys with fresh system user presence. The software signer is compiled only into Debug simulator builds and must be explicitly permitted during root enrollment. Physical-device and Release builds reject development release metadata. Simulator evidence cannot establish hardware-backed authentication or real push delivery.

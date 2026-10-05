@@ -1,6 +1,10 @@
 import Foundation
 import Testing
+#if os(iOS)
+@testable import SynIOS
+#else
 @testable import Syn
+#endif
 
 @Test func displaySeparatesBytesFromLiteralEscapeSyntax() {
     let pairs: [(Data, Data)] = [

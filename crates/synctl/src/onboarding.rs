@@ -1649,7 +1649,25 @@ fn configure_identities(request: &OnboardingRequest) -> Result<()> {
 
 fn configure_target(request: &OnboardingRequest, managed_uid: u32) -> Result<()> {
     let listen = std::net::SocketAddr::new(request.listen_ip, syn_config::DEFAULT_LISTEN_PORT);
+    let prior_agent = match AgentConfig::load(DEFAULT_AGENT_CONFIG) {
+        Ok(config) => Some(config),
+        Err(syn_config::ConfigError::Read { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            None
+        }
+        Err(error) => {
+            return Err(error)
+                .context("refusing to overwrite invalid existing approver configuration")
+        }
+    };
+    let prior_registry = prior_agent
+        .as_ref()
+        .and_then(|c| c.approver_registry.clone());
+    let prior_apns = prior_agent.as_ref().and_then(|c| c.apns.clone());
     let agent = AgentConfig {
+        approver_registry: prior_registry.clone(),
+        apns: prior_apns,
         schema_version: syn_config::AGENT_CONFIG_SCHEMA_VERSION,
         target_id: request.target_id.clone(),
         listen: listen.to_string(),
@@ -1665,6 +1683,7 @@ fn configure_target(request: &OnboardingRequest, managed_uid: u32) -> Result<()>
     };
     agent.validate()?;
     let plugin = PluginConfig {
+        approver_registry: prior_registry,
         schema_version: 1,
         target_id: request.target_id.clone(),
         managed_uid,

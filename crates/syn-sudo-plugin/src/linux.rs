@@ -32,7 +32,7 @@ const SUDO_CONV_PROMPT_ECHO_ON: c_int = 0x0002;
 const SUDO_CONV_ERROR_MSG: c_int = 0x0003;
 const SUDO_CONV_INFO_MSG: c_int = 0x0004;
 static GENERIC_ERROR: &[u8] = b"Syn denied due to an internal approval error\0";
-const DENIAL_NOTICE: &str = "Syn approval was denied or Mac authentication was canceled. Rerun sudo to create a new request.\n";
+const DENIAL_NOTICE: &str = "Syn approval was denied or device authentication was canceled. Rerun sudo to create a new request.\n";
 
 type SudoConv = unsafe extern "C" fn(
     num_msgs: c_int,
@@ -242,6 +242,12 @@ unsafe extern "C" fn plugin_check(
         ensure_root_owned_file(&config.approval_public_key)?;
         ensure_root_owned_file(&config.denial_public_key)?;
 
+        let registry = config
+            .approver_registry
+            .as_deref()
+            .map(syn_config::approvers::ApproverRegistry::load)
+            .transpose()
+            .map_err(|_| "unable to load trusted approver registry")?;
         if state.invoking_uid != config.managed_uid {
             return Ok(1);
         }
@@ -304,11 +310,12 @@ unsafe extern "C" fn plugin_check(
             Ok(AgentReply::Decision(signed_decision)) => {
                 let approval_key = read_verifying_key(&config.approval_public_key)?;
                 let denial_key = read_verifying_key(&config.denial_public_key)?;
-                evaluate_decision(
+                evaluate_paired_decision(
                     &signed_decision,
                     &verified_request,
                     &approval_key,
                     &denial_key,
+                    registry.as_ref(),
                     started,
                     timeout,
                 )
@@ -479,6 +486,34 @@ fn wait_for_approval_or_password(
         std::thread::sleep(remaining.min(IO_SLICE));
     }
     DecisionOutcome::Expired
+}
+
+fn evaluate_paired_decision(
+    signed: &[u8],
+    request: &VerifiedRequest,
+    approval_key: &VerifyingKey,
+    denial_key: &VerifyingKey,
+    registry: Option<&syn_config::approvers::ApproverRegistry>,
+    started: Instant,
+    timeout: Duration,
+) -> Result<DecisionOutcome, &'static str> {
+    if verify_decision(signed, approval_key).is_ok() || verify_decision(signed, denial_key).is_ok()
+    {
+        return evaluate_decision(signed, request, approval_key, denial_key, started, timeout);
+    }
+    if let Some(registry) = registry {
+        for record in &registry.approvers {
+            let (approval, denial) = record
+                .keys()
+                .map_err(|_| "invalid approver decision keys")?;
+            if verify_decision(signed, &approval).is_ok()
+                || verify_decision(signed, &denial).is_ok()
+            {
+                return evaluate_decision(signed, request, &approval, &denial, started, timeout);
+            }
+        }
+    }
+    Err("Syn received an invalid decision signature")
 }
 
 fn evaluate_decision(
@@ -1418,6 +1453,80 @@ mod tests {
     }
 
     #[test]
+    fn additional_device_decisions_require_current_trust_and_correct_class() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use syn_config::approvers::{ApproverRecord, ApproverRegistry};
+        use syn_protocol::{sign_decision, DecisionV1};
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
+        let target = SigningKey::from_slice(&[1; 32]).unwrap();
+        let primary_approval = SigningKey::from_slice(&[2; 32]).unwrap();
+        let primary_denial = SigningKey::from_slice(&[3; 32]).unwrap();
+        let approval = SigningKey::from_slice(&[4; 32]).unwrap();
+        let denial = SigningKey::from_slice(&[5; 32]).unwrap();
+        let request = verify_request(
+            &hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let registry = ApproverRegistry {
+            schema_version: 1,
+            approvers: vec![ApproverRecord {
+                schema_version: 1,
+                device_id: "test-phone".into(),
+                display_name: "Test phone".into(),
+                development: true,
+                approval_public_x963_base64: STANDARD
+                    .encode(syn_protocol::verifying_key_sec1(approval.verifying_key())),
+                denial_public_x963_base64: STANDARD
+                    .encode(syn_protocol::verifying_key_sec1(denial.verifying_key())),
+                client_certificate_pem:
+                    "-----BEGIN CERTIFICATE-----\nMAMCAQE=\n-----END CERTIFICATE-----".into(),
+            }],
+        };
+        let evaluate = |signed: &[u8], trust: Option<&ApproverRegistry>| {
+            evaluate_paired_decision(
+                signed,
+                &request,
+                primary_approval.verifying_key(),
+                primary_denial.verifying_key(),
+                trust,
+                Instant::now(),
+                Duration::from_secs(syn_config::APPROVAL_TIMEOUT_SECONDS),
+            )
+        };
+        let decision = DecisionV1::for_request(
+            &request,
+            DecisionAction::ApproveOnce,
+            AuthenticationClass::SystemUserPresence,
+            approval.verifying_key(),
+        );
+        let signed = sign_decision(&decision, &approval).unwrap();
+        assert_eq!(
+            evaluate(&signed, Some(&registry)).unwrap(),
+            DecisionOutcome::Approve
+        );
+        assert!(evaluate(&signed, None).is_err());
+        assert!(evaluate(&signed, Some(&ApproverRegistry::empty())).is_err());
+        let wrong_key = sign_decision(&decision, &denial).unwrap();
+        assert!(evaluate(&wrong_key, Some(&registry)).is_err());
+        let denial_decision = DecisionV1::for_request(
+            &request,
+            DecisionAction::Deny,
+            AuthenticationClass::DeviceAuthenticated,
+            denial.verifying_key(),
+        );
+        assert_eq!(
+            evaluate(
+                &sign_decision(&denial_decision, &denial).unwrap(),
+                Some(&registry)
+            )
+            .unwrap(),
+            DecisionOutcome::Deny
+        );
+    }
+
+    #[test]
     fn integrity_and_denial_are_final_even_after_deadline() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
@@ -1526,7 +1635,7 @@ mod tests {
 
     #[test]
     fn denial_notice_explains_cancellation_and_one_use_retry_without_claiming_a_reason() {
-        assert!(DENIAL_NOTICE.contains("denied or Mac authentication was canceled"));
+        assert!(DENIAL_NOTICE.contains("denied or device authentication was canceled"));
         assert!(DENIAL_NOTICE.contains("Rerun sudo to create a new request"));
         assert!(!DENIAL_NOTICE.contains("password"));
     }

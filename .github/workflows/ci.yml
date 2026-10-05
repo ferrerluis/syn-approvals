@@ -55,6 +55,7 @@ jobs:
       - run: cargo run --quiet --locked -p syn-protocol --example golden_vectors > /tmp/protocol-v2.json
       - run: cmp tests/fixtures/protocol-v2.json /tmp/protocol-v2.json
       - run: cmp tests/fixtures/protocol-v2.json macos/Tests/SynTests/Fixtures/protocol-v2.json
+      - run: cmp tests/fixtures/notification-registration-v1.json macos/Tests/SynTests/Fixtures/notification-registration-v1.json
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p syn-sudo-plugin --target aarch64-unknown-linux-gnu --locked -- -D warnings
       - run: cargo test --workspace --locked
@@ -168,6 +169,22 @@ jobs:
           name: mac-release
           path: ${{ runner.temp }}/release/Syn-macOS-*.zip
           if-no-files-found: error
+
+  ios:
+    runs-on: macos-26
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Validate release build guards
+        run: python3 -m unittest scripts/tests/test_stage_ios_release.py
+      - name: Test shared protocol and iPhone state on a simulator
+        run: |
+          set -eu
+          device_id=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; devices=json.load(sys.stdin)["devices"]; print(next(d["udid"] for runtime,items in devices.items() if "iOS" in runtime for d in items if d["name"].startswith("iPhone")))')
+          xcodebuild -project ios/SynIOS.xcodeproj -scheme SynIOS -configuration Debug \
+            -destination "id=$device_id" -derivedDataPath "$RUNNER_TEMP/syn-ios" \
+            test
 
   publish-experimental:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
