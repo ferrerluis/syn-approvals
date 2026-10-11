@@ -43,7 +43,10 @@ enum UpdateHealth {
                   map[1]?.textValue == target.targetID, map[2]?.bytesValue?.count == 32,
                   let issued = map[3]?.unsignedValue, let timestamp = Int64(exactly: issued),
                   map[4]?.unsignedValue == 10_000,
-                  timestamp <= milliseconds, milliseconds - timestamp < 10_000,
+                  // The two machines need not agree to the millisecond. The
+                  // target and relay still enforce their original ten-second
+                  // monotonic deadline; this tolerance cannot extend it.
+                  timestamp <= milliseconds + 1_000, milliseconds - timestamp < 10_000,
                   map[5]?.textValue == release.id, map[6]?.textValue == release.commit,
                   map[7]?.bytesValue == Data(SHA256.hash(data: identities.approval)),
                   keyID == Data(SHA256.hash(data: bytes)) else {

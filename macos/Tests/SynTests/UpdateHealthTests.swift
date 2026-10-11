@@ -40,6 +40,14 @@ private final class HealthSigner: DecisionSigning, @unchecked Sendable {
     let signer = HealthSigner()
     let provider = FixedDecisionSignerProvider(signer: signer)
     let now = Date(timeIntervalSince1970: 1_700_000_001)
+    // A target clock slightly ahead of the Mac is normal, but a challenge
+    // more than one second in the future is still rejected.
+    _ = try await UpdateHealth.response(to: check, target: target, provider: provider,
+        now: Date(timeIntervalSince1970: 1_699_999_999.5))
+    await #expect(throws: SynProtocolError.self) {
+        try await UpdateHealth.response(to: check, target: target, provider: provider,
+            now: Date(timeIntervalSince1970: 1_699_999_998.999))
+    }
     let response = try await UpdateHealth.response(to: check, target: target, provider: provider, now: now)
     let (payload, _) = try SynProtocol.verifyCOSE(response, key: signer.device.publicKey)
     let expected = try Data(hex: #require(fixture["signed_health_response_hex"] as? String))
@@ -61,7 +69,7 @@ private final class HealthSigner: DecisionSigning, @unchecked Sendable {
     let fields = try CBORCodec.decodeCanonical(original).integerKeyedMap()
     let invalid: [(UInt64, CBOR)] = [
         (0, .text("approval")), (1, .text("other-target")),
-        (2, .bytes(Data(repeating: 7, count: 16))), (3, .unsigned(1_700_000_002_000)),
+        (2, .bytes(Data(repeating: 7, count: 16))), (3, .unsigned(1_700_000_002_001)),
         (4, .unsigned(90_000)), (5, .text("20261011000000")),
         (6, .text(String(repeating: "1", count: 40))),
         (7, .bytes(Data(repeating: 9, count: 32))),

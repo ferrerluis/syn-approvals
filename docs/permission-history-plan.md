@@ -10,7 +10,7 @@ Display-only result receipts bind to the target, request ID, request hash and ex
 
 ## Added update behavior
 
-An already-paired machine update performs silent, signed health checks before activating sudo and before disarming automatic recovery. These use a separate, short-lived challenge with no command or approval action. The Mac signs with its existing device/denial key, never its user-presence approval key. Both the relay and root helper validate the identity, nonce, exact release, paired approval public key and deadline.
+An already-paired machine update performs silent, signed health checks before activating sudo and before disarming automatic recovery. These use a separate, short-lived challenge with no command or approval action. The Mac signs with its existing device/denial key, never its user-presence approval key. Both the relay and root helper validate the identity, nonce, exact release, paired approval public key and deadline. The Mac allows up to one second of target clock lead; the target and relay still enforce the original ten-second deadline.
 
 Retain protected pairing evidence and save a separate fresh health proof; do not relabel background verification as a user approval. Derive eligibility from the remote machine's protected existing pairing, never a caller-controlled flag. First-time setup retains its authenticated checks. Keep independent recovery access, remove NOPASSWD first on recovery, add it last on activation, and preserve the alternate-provider setuid audit.
 
