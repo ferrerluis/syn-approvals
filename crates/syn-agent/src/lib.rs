@@ -19,8 +19,8 @@ use syn_config::{approvers::ApproverRegistry, AgentConfig};
 use syn_protocol::message_kind;
 use syn_protocol::{
     encode_canonical, verify_decision, verify_request, AuthenticationClass, CancelV1,
-    DecisionAction, ErrorV1, HelloV1, VerifiedDecision, VerifiedRequest, WireMessageV1,
-    MAX_WIRE_BYTES, PROTOCOL_VERSION,
+    DecisionAction, ErrorV1, HelloV1, RequestResultV1, VerifiedDecision, VerifiedRequest,
+    WireMessageV1, MAX_WIRE_BYTES, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -96,7 +96,7 @@ struct PendingRequest {
 }
 
 enum LocalResponse {
-    Decision(Vec<u8>),
+    Decision(Vec<u8>, u8),
     IntegrityFailure,
 }
 
@@ -326,6 +326,9 @@ async fn handle_local(
     let request_id_bytes = verified.request.request_id.to_vec();
     let request_id = hex::encode(verified.request.request_id.as_slice());
     let ttl = Duration::from_millis(verified.request.ttl_ms.into());
+    // Display bookkeeping only: never changes the authorization deadline.
+    let history_deadline = history_deadline(&verified, unix_ms(), Instant::now());
+    let receipt = RequestResultV1::for_request(&verified, 6, 0);
     let (response_tx, response_rx) = oneshot::channel();
     {
         let mut pending = state.pending.lock().await;
@@ -347,18 +350,22 @@ async fn handle_local(
             },
         );
     }
+    info!(event = "request_history", request_id = %request_id,
+        target_id = %receipt.target_id, requested_at_unix_ms = receipt.requested_at_unix_ms,
+        invoking_uid = receipt.invoking_uid, run_as_uid = receipt.run_as_uid,
+        outcome = "pending", "Syn permission request");
     let request_event = WireMessageV1::new(message_kind::REQUEST, message.body.to_vec())?;
     let _ = state.event_tx.send(request_event);
 
     enum LocalOutcome {
-        Decision(Vec<u8>),
+        Decision(Vec<u8>, u8),
         IntegrityFailure,
         Expired,
         Disconnected,
     }
     let outcome = tokio::select! {
         response = response_rx => match response {
-            Ok(LocalResponse::Decision(decision)) => LocalOutcome::Decision(decision),
+            Ok(LocalResponse::Decision(decision, outcome)) => LocalOutcome::Decision(decision, outcome),
             Ok(LocalResponse::IntegrityFailure) => LocalOutcome::IntegrityFailure,
             Err(_) => LocalOutcome::Expired,
         },
@@ -366,16 +373,23 @@ async fn handle_local(
         _ = stream.read_u8() => LocalOutcome::Disconnected,
     };
     match outcome {
-        LocalOutcome::Decision(signed_decision) => {
+        LocalOutcome::Decision(signed_decision, outcome) => {
+            // route_decision already verified signature, binding, class and timeliness.
             let response = WireMessageV1::new(message_kind::DECISION, signed_decision)?.encode()?;
-            write_frame(&mut stream, &response).await?;
+            if let Err(error) = write_frame(&mut stream, &response).await {
+                record_result(&state, receipt, 6);
+                return Err(error);
+            }
+            record_result(&state, receipt, outcome);
         }
         LocalOutcome::Expired => {
             state.pending.lock().await.remove(&request_id);
+            record_result(&state, receipt, 3);
             broadcast_cancel(&state, &request_id_bytes).await?;
             write_unavailable(&mut stream, "expired", "no valid decision before deadline").await?;
         }
         LocalOutcome::IntegrityFailure => {
+            record_result(&state, receipt, 5);
             let error = ErrorV1 {
                 code: "integrity_failure".into(),
                 message: "authenticated approver sent an invalid decision".into(),
@@ -386,10 +400,60 @@ async fn handle_local(
         }
         LocalOutcome::Disconnected => {
             state.pending.lock().await.remove(&request_id);
+            // The plugin closes its socket at its own timeout, slightly before
+            // the relay timer. Classify that as expiry rather than cancellation.
+            let outcome = if Instant::now() >= history_deadline {
+                3
+            } else {
+                4
+            };
+            record_result(&state, receipt, outcome);
             broadcast_cancel(&state, &request_id_bytes).await?;
         }
     }
     Ok(())
+}
+
+fn unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn history_deadline(request: &VerifiedRequest, now_ms: i64, now: Instant) -> Instant {
+    let age = now_ms
+        .saturating_sub(request.request.issued_at_unix_ms)
+        .max(0) as u64;
+    now + Duration::from_millis(u64::from(request.request.ttl_ms).saturating_sub(age))
+}
+
+fn record_result(state: &AgentState, mut receipt: RequestResultV1, outcome: u8) {
+    receipt.outcome = outcome;
+    receipt.completed_at_unix_ms = unix_ms();
+    let category = match outcome {
+        1 => "approved",
+        2 => "denied",
+        3 => "timed_out",
+        4 => "canceled",
+        5 => "failed",
+        _ => "unconfirmed",
+    };
+    info!(event = "request_history", request_id = %hex::encode(receipt.request_id.as_slice()),
+        target_id = %receipt.target_id, requested_at_unix_ms = receipt.requested_at_unix_ms,
+        completed_at_unix_ms = receipt.completed_at_unix_ms, invoking_uid = receipt.invoking_uid,
+        run_as_uid = receipt.run_as_uid, outcome = category, "Syn permission result");
+    // History failures have no influence on permission decisions.
+    match encode_canonical(&receipt).and_then(|body| WireMessageV1::new(message_kind::RESULT, body))
+    {
+        Ok(event) => {
+            let _ = state.event_tx.send(event);
+        }
+        Err(_) => warn!(
+            event = "history_failure",
+            "Permission receipt could not be encoded"
+        ),
+    }
 }
 
 async fn broadcast_cancel(state: &AgentState, request_id: &[u8]) -> Result<()> {
@@ -624,7 +688,13 @@ async fn route_bound_decision(
     broadcast_cancel(state, pending.verified.request.request_id.as_slice()).await?;
     pending
         .response_tx
-        .send(LocalResponse::Decision(signed.to_vec()))
+        .send(LocalResponse::Decision(
+            signed.to_vec(),
+            match verified.decision.action {
+                DecisionAction::ApproveOnce => 1,
+                DecisionAction::Deny => 2,
+            },
+        ))
         .map_err(|_| anyhow!("requesting sudo process disconnected"))
 }
 
@@ -875,12 +945,91 @@ mod tests {
         );
         let signed = sign_decision(&decision, &approval).unwrap();
         route_decision(&signed, &state).await.unwrap();
-        let LocalResponse::Decision(routed) = response_rx.await.unwrap() else {
+        let LocalResponse::Decision(routed, outcome) = response_rx.await.unwrap() else {
             panic!("valid approval was hard-failed");
         };
         assert_eq!(routed, signed);
+        assert_eq!(outcome, 1);
         assert!(state.pending.lock().await.is_empty());
         assert!(route_decision(&signed, &state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn local_sender_receives_decision_before_permission_receipt() {
+        for (action, class, expected) in [
+            (
+                DecisionAction::ApproveOnce,
+                AuthenticationClass::SystemUserPresence,
+                1,
+            ),
+            (
+                DecisionAction::Deny,
+                AuthenticationClass::DeviceAuthenticated,
+                2,
+            ),
+        ] {
+            let target = generate_signing_key();
+            let approver = generate_signing_key();
+            let request = ApprovalRequestV1::new("pi-dev".into(), target.verifying_key(), intent());
+            let signed = sign_request(&request, &target).unwrap();
+            let verified = verify_request(&signed, target.verifying_key()).unwrap();
+            let (event_tx, mut event_rx) = broadcast::channel(4);
+            let state = Arc::new(AgentState {
+                target_id: "pi-dev".into(),
+                target_key: *target.verifying_key(),
+                approval_key: *approver.verifying_key(),
+                denial_key: *approver.verifying_key(),
+                max_pending: 4,
+                pending: Mutex::new(HashMap::new()),
+                event_tx,
+            });
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let uid = server.peer_cred().unwrap().uid();
+            let task = tokio::spawn(handle_local(server, state.clone(), uid));
+            let request_wire = WireMessageV1::new(message_kind::REQUEST, signed)
+                .unwrap()
+                .encode()
+                .unwrap();
+            write_frame(&mut client, &request_wire).await.unwrap();
+            assert_eq!(event_rx.recv().await.unwrap().kind, message_kind::REQUEST);
+            let decision =
+                DecisionV1::for_request(&verified, action, class, approver.verifying_key());
+            let signed_decision = sign_decision(&decision, &approver).unwrap();
+            route_decision(&signed_decision, &state).await.unwrap();
+            let response = WireMessageV1::decode(&read_frame(&mut client).await.unwrap()).unwrap();
+            assert_eq!(response.kind, message_kind::DECISION);
+            assert_eq!(response.body.as_slice(), signed_decision);
+            task.await.unwrap().unwrap();
+            let event = event_rx.recv().await.unwrap();
+            assert_eq!(event.kind, message_kind::RESULT);
+            let receipt: RequestResultV1 = syn_protocol::decode_canonical(&event.body).unwrap();
+            receipt.validate().unwrap();
+            assert_eq!(receipt.outcome, expected);
+            assert_eq!(
+                receipt.request_payload_hash.as_slice(),
+                verified.payload_hash
+            );
+        }
+    }
+
+    #[test]
+    fn sender_timeout_uses_original_request_age_only_for_history() {
+        let key = generate_signing_key();
+        let request = ApprovalRequestV1::new("pi-dev".into(), key.verifying_key(), intent());
+        let signed = sign_request(&request, &key).unwrap();
+        let verified = verify_request(&signed, key.verifying_key()).unwrap();
+        let now = Instant::now();
+        let expired = history_deadline(&verified, request.issued_at_unix_ms + 90_001, now);
+        assert_eq!(expired, now);
+        let remaining = history_deadline(&verified, request.issued_at_unix_ms + 89_999, now);
+        assert_eq!(remaining, now + Duration::from_millis(1));
+        let receipt =
+            RequestResultV1::for_request(&verified, 3, request.issued_at_unix_ms + 90_000);
+        receipt.validate().unwrap();
+        let encoded = encode_canonical(&receipt).unwrap();
+        let decoded: RequestResultV1 = syn_protocol::decode_canonical(&encoded).unwrap();
+        assert_eq!(receipt, decoded);
+        assert!(!String::from_utf8_lossy(&encoded).contains("/usr/bin/true"));
     }
 
     #[tokio::test]
@@ -916,6 +1065,11 @@ mod tests {
         drop(client);
         task.await.unwrap().unwrap();
 
+        let result_event = event_rx.recv().await.unwrap();
+        assert_eq!(result_event.kind, message_kind::RESULT);
+        let result: RequestResultV1 = syn_protocol::decode_canonical(&result_event.body).unwrap();
+        assert_eq!(result.outcome, 4);
+        result.validate().unwrap();
         let cancel_event = event_rx.recv().await.unwrap();
         assert_eq!(cancel_event.kind, message_kind::CANCEL);
         let cancel: CancelV1 = syn_protocol::decode_canonical(&cancel_event.body).unwrap();

@@ -429,6 +429,64 @@ pub struct HelloV1 {
     pub release_commit: String,
 }
 
+/// Observational relay receipt. Never accepted as an authorization decision.
+#[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct RequestResultV1 {
+    #[n(0)]
+    pub target_id: String,
+    #[n(1)]
+    pub request_id: ByteVec,
+    #[n(2)]
+    pub request_payload_hash: ByteVec,
+    #[n(3)]
+    pub release_id: String,
+    #[n(4)]
+    pub release_commit: String,
+    #[n(5)]
+    pub requested_at_unix_ms: i64,
+    #[n(6)]
+    pub completed_at_unix_ms: i64,
+    /// 1 approved, 2 denied, 3 timed out, 4 canceled, 5 failed, 6 unconfirmed.
+    #[n(7)]
+    pub outcome: u8,
+    #[n(8)]
+    pub invoking_uid: u32,
+    #[n(9)]
+    pub run_as_uid: u32,
+}
+
+impl RequestResultV1 {
+    pub fn for_request(request: &VerifiedRequest, outcome: u8, completed_at_unix_ms: i64) -> Self {
+        Self {
+            target_id: request.request.target_id.clone(),
+            request_id: request.request.request_id.clone(),
+            request_payload_hash: request.payload_hash.to_vec().into(),
+            release_id: request.request.release_id.clone(),
+            release_commit: request.request.release_commit.clone(),
+            requested_at_unix_ms: request.request.issued_at_unix_ms,
+            completed_at_unix_ms,
+            outcome,
+            invoking_uid: request.request.sudo.invoking_uid,
+            run_as_uid: request.request.sudo.run_as_uid,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.target_id.is_empty()
+            || self.target_id.len() > 128
+            || self.request_id.len() != 16
+            || self.request_payload_hash.len() != 32
+            || !(1..=6).contains(&self.outcome)
+            || self.release_id != release_id()
+            || self.release_commit != release_commit()
+        {
+            return Err(validation("invalid observational receipt"));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
 #[cbor(map)]
 pub struct CancelV1 {

@@ -103,6 +103,25 @@ Kinds are hello, request, cancel, decision, result, ping, pong, error, and unava
 
 The root plug-in uses the same envelope over a Unix stream prefixed by a four-byte network-order length. Only request, cancel, decision, and unavailable/error messages are valid locally. The unprivileged relay can verify and relay messages but has no command-execution API and never holds the target authorization private key.
 
+## Observational permission receipts
+
+The existing `result` kind carries a canonical ten-key CBOR map: target ID (0),
+16-byte request ID (1), 32-byte request payload hash (2), release ID (3), release
+commit (4), signed request timestamp in Unix milliseconds (5), completion
+Unix milliseconds (6), result category (7), invoking UID (8), and run-as UID (9).
+Categories are 1 approved, 2 denied, 3 timed out, 4 canceled, 5 failed, and
+6 unconfirmed. These are relay observations over the existing pinned mTLS
+connection, not target-signed authorizations or command execution receipts.
+
+Approval/denial is recorded only after returning the validated decision to the
+waiting local sender. A failed write is unconfirmed. On sender disconnect, an
+elapsed original request expiry is reported as timed out; an earlier disconnect
+is canceled. This display bookkeeping never changes the monotonic authorization
+deadline. A receipt cannot create a pending request, sign a decision, enter PAM,
+or execute a command. The Mac accepts it only for a matching observed request
+and never imports offline history. Repeated identical results are harmless;
+conflicting terminal results are rejected.
+
 ## State machine
 
 ```text

@@ -3,8 +3,8 @@ use p256::ecdsa::SigningKey;
 use serde_json::json;
 use syn_protocol::{
     digest_environment, key_id, sign_decision, sign_request, verify_request, ApprovalRequestV1,
-    AuthenticationClass, CommandInfoEntry, DecisionAction, DecisionV1, SudoIntentV1,
-    PROTOCOL_VERSION, SUDO_ADAPTER_KIND, SUDO_SCHEMA_VERSION,
+    AuthenticationClass, CommandInfoEntry, DecisionAction, DecisionV1, RequestResultV1,
+    SudoIntentV1, PROTOCOL_VERSION, SUDO_ADAPTER_KIND, SUDO_SCHEMA_VERSION,
 };
 
 fn main() {
@@ -99,6 +99,10 @@ fn main() {
 
     let output = json!({
         "schema_version": 1,
+        "approved_result_hex": hex::encode(syn_protocol::encode_canonical(
+            &RequestResultV1::for_request(&verified, 1, 1_700_000_001_000)).unwrap()),
+        "timed_out_result_hex": hex::encode(syn_protocol::encode_canonical(
+            &RequestResultV1::for_request(&verified, 3, 1_700_000_090_000)).unwrap()),
         "target_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(target.verifying_key())),
         "approval_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(approval.verifying_key())),
         "denial_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(denial.verifying_key())),
