@@ -38,7 +38,15 @@ struct SynContentView: View {
         NavigationSplitView {
             VStack(spacing: 0) {
                 SynBrandHeader()
-                List(selection: $model.selectedRequestID) {
+                List(selection: Binding(
+                    get: { model.selectedTargetID.map { "machine:\($0)" } ?? model.selectedRequestID },
+                    set: { value in
+                        model.showingSettings = false
+                        if let value, value.hasPrefix("machine:") {
+                            model.selectTarget(String(value.dropFirst(8)))
+                        } else { model.selectedTargetID = nil; model.selectedRequestID = value }
+                    }
+                )) {
                     Section("Pending") {
                         ForEach(model.pending) { request in
                             VStack(alignment: .leading) {
@@ -58,19 +66,34 @@ struct SynContentView: View {
                                 Text(model.connectedTargets.contains(target.targetID) ? "Connected" : (model.pausedConnections.contains(target.targetID) ? "Retry needed" : "Disconnected"))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
+                            .tag("machine:\(target.targetID)")
                         }
                     }
                 }
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 260)
         } detail: {
-            if let request = model.selectedRequest ?? model.pending.first {
+            if model.showingSettings {
+                SetupView(model: model)
+            } else if let targetID = model.selectedTargetID {
+                RequestHistoryView(model: model, targetID: targetID)
+            } else if let request = model.selectedRequest ?? model.pending.first {
                 ApprovalDetailView(model: model, request: request)
             } else {
                 SetupView(model: model)
             }
         }
+        .toolbar {
+            Button("Settings", systemImage: "gearshape") {
+                model.selectedRequestID = nil
+                model.selectedTargetID = nil
+                model.showingSettings = true
+            }
+        }
         .frame(minWidth: 840, minHeight: 580)
+        .onChange(of: model.selectedRequestID) { _, value in
+            if value != nil { model.selectedTargetID = nil; model.showingSettings = false }
+        }
         .onAppear { model.openMainWindow = { openWindow(id: "main") } }
         .sheet(isPresented: $model.showStartupPrompt, onDismiss: {
             model.dismissStartupPrompt()
@@ -99,6 +122,49 @@ struct SynContentView: View {
             Button("OK") { model.lastError = nil }
         } message: {
             Text(model.lastError ?? "")
+        }
+    }
+}
+
+private struct RequestHistoryView: View {
+    @ObservedObject var model: SynModel
+    let targetID: String
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(model.targets.first { $0.targetID == targetID }?.displayName ?? targetID)
+                    .font(.title.bold())
+                Text("Permission request history").font(.headline)
+                Text("Requests observed by this Mac. Command contents are not saved.")
+                    .foregroundStyle(.secondary)
+                if let error = model.historyError { Text(error).foregroundStyle(.red) }
+                let entries = model.history(for: targetID)
+                if entries.isEmpty { Text("No requests yet.").foregroundStyle(.secondary) }
+                ForEach(entries) { entry in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(entry.status.label).font(.headline)
+                            if !entry.confirmed && entry.status == .timedOut {
+                                Text("Observed on this Mac").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if model.pending.contains(where: { $0.id == entry.id }) {
+                                Button("Review") { model.review(entry.id) }
+                            }
+                        }
+                        Text("Requested: \(entry.requestedAt.formatted(date: .abbreviated, time: .standard))")
+                        if let completed = entry.completedAt {
+                            Text("Completed: \(completed.formatted(date: .abbreviated, time: .standard))")
+                        }
+                        Text("Request ID: \(entry.requestID)").font(.system(.caption, design: .monospaced))
+                            .textSelection(.enabled)
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }.padding(24)
         }
     }
 }

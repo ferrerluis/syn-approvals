@@ -112,7 +112,9 @@ private func decisionAction(_ message: WireMessage, key: P256.Signing.PublicKey)
     #expect(messages.count == 1)
     #expect(try decisionAction(#require(messages.first), key: signer.denial.publicKey) == 2)
     #expect(model.pending.isEmpty)
+    #expect(model.history.first?.confirmed == false)
 }
+
 
 @Test @MainActor func approvalSignsAndSendsOnlyOnce() async throws {
     let signer = TestSigner()
@@ -226,6 +228,8 @@ private func decisionAction(_ message: WireMessage, key: P256.Signing.PublicKey)
     #expect(model.pending.isEmpty)
     #expect(signer.denialSigns == 0)
     #expect(model.lastError?.contains("could not be confirmed") == true)
+    #expect(model.history.first?.status == .unconfirmed)
+    #expect(model.history.first?.confirmed == false)
 }
 
 @Test func notificationsExcludeCommandAndEnvironment() {

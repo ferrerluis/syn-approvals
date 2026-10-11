@@ -32,6 +32,10 @@ final class SynModel: ObservableObject {
     @Published private(set) var preparingKeys = false
     @Published private(set) var keysReady = false
     @Published var showStartupPrompt = false
+    @Published private(set) var history: [RequestHistoryEntry] = []
+    @Published private(set) var historyError: String?
+    @Published var showingSettings = false
+    @Published var selectedTargetID: String?
     @Published var selectedRequestID: String?
     @Published var lastError: String?
     @Published var pairingProfileText = ""
@@ -44,6 +48,7 @@ final class SynModel: ObservableObject {
     var openMainWindow: (() -> Void)?
 
     private let store: TargetStore?
+    private let historyStore: RequestHistoryStore?
     private let signingProvider: any DecisionSignerProviding
     private let servicesEnabled: Bool
     private let startupPreference: StartupPreference?
@@ -56,6 +61,7 @@ final class SynModel: ObservableObject {
     private let notifications: any SynNotifying
     private let verifiedRequestObserver: (@Sendable (VerifiedApprovalRequest) throws -> Void)?
     private var connections: [String: TargetConnection] = [:]
+    private var historyLoadFailed = false
     private var seenRequests: [String: (hash: Data, expiresAt: Date)] = [:]
     private var reconnectAttempts: [String: Int] = [:]
     private var reconnectTasks: [String: Task<Void, Never>] = [:]
@@ -80,6 +86,7 @@ final class SynModel: ObservableObject {
         hostKeyScanner: any SSHHostKeyScanning = SystemSSHHostKeyScanner(),
         knownHostsStore: SynKnownHostsStore? = nil,
         targetStore: TargetStore? = nil,
+        historyStore: RequestHistoryStore? = nil,
         startupPreference: StartupPreference? = nil,
         notifications: any SynNotifying = SynNotificationCenter(),
         transportIdentityStore: TransportIdentityStore = TransportIdentityStore(),
@@ -96,8 +103,25 @@ final class SynModel: ObservableObject {
         self.notifications = notifications
         self.transportIdentityStore = transportIdentityStore
         self.verifiedRequestObserver = verifiedRequestObserver
-        guard startServices else { store = nil; return }
-        store = targetStore ?? (try? TargetStore())
+        store = startServices ? (targetStore ?? (try? TargetStore())) : nil
+        self.historyStore = historyStore ?? (startServices ? try? RequestHistoryStore() : nil)
+        if let historyStore = self.historyStore {
+            do {
+                history = try historyStore.load()
+                for index in history.indices {
+                    if history[index].confirmed && history[index].targetSignatureVerified != true {
+                        history[index].confirmed = false
+                        history[index].status = .unconfirmed
+                    }
+                    if history[index].completedAt == nil {
+                        history[index].status = .unconfirmed
+                        history[index].completedAt = .now
+                    }
+                }
+                try historyStore.save(history)
+            } catch { historyLoadFailed = true; historyError = "Request history could not be loaded or saved." }
+        } else if startServices { historyError = "Request history storage is unavailable." }
+        guard startServices else { return }
         if let store {
             do {
                 targets = try store.load()
@@ -442,6 +466,7 @@ final class SynModel: ObservableObject {
             approvalCancellations.removeValue(forKey: requestID)?.cancel()
         }
         guard !request.isExpired else {
+            setHistory(request.id, status: .timedOut)
             finish(request)
             lastError = "That approval request has expired."
             return
@@ -464,16 +489,19 @@ final class SynModel: ObservableObject {
             return
         }
         guard !request.isExpired, pending.contains(where: { $0.id == request.id }) else {
+            if request.isExpired { setHistory(request.id, status: .timedOut) }
             finish(request)
             lastError = "The request expired or was canceled while macOS checked your identity. Nothing was approved."
             return
         }
         // Once delivery starts, a lost connection cannot tell us whether the
         // target received the decision. Never describe that as proven denial.
+        setHistory(request.id, status: .approvalSent, completed: false)
         finish(request)
         do {
             try await send(.init(kind: .decision, body: decision), to: request.targetID)
         } catch {
+            setHistory(request.id, status: .unconfirmed)
             lastError = "Approval delivery could not be confirmed. Check the original remote machine invocation before retrying."
         }
     }
@@ -482,6 +510,8 @@ final class SynModel: ObservableObject {
         guard let request = pending.first(where: { $0.id == requestID }) else { return }
         // Remove first: an approval already waiting for authentication may no
         // longer send, even if denial signing or delivery subsequently fails.
+        setHistory(request.id, status: request.isExpired ? .timedOut : .denialSent,
+                   completed: request.isExpired)
         finish(request)
         guard !request.isExpired else { return }
         do {
@@ -492,14 +522,17 @@ final class SynModel: ObservableObject {
                 reason: "",
                 signer: signer
             )
-            guard !request.isExpired else { return }
+            guard !request.isExpired else { setHistory(request.id, status: .timedOut); return }
             try await send(.init(kind: .decision, body: decision), to: request.targetID)
         } catch {
+            setHistory(request.id, status: .unconfirmed)
             lastError = "Denial could not reach the remote machine. Nothing was approved, but it may offer its timeout fallback."
         }
     }
 
     func review(_ requestID: String) {
+        showingSettings = false
+        selectedTargetID = nil
         selectedRequestID = requestID
         openMainWindow?()
         if servicesEnabled { NSApp.activate(ignoringOtherApps: true) }
@@ -666,11 +699,27 @@ final class SynModel: ObservableObject {
                     }
                     if let request = pending.first(where: {
                         $0.targetID == target.targetID && $0.requestID == requestID
-                    }) { finish(request) }
+                    }) {
+                        setHistory(request.id, status: .unconfirmed)
+                        finish(request)
+                    }
                 case .ping:
                     let connection = connections[target.targetID]
                     Task { try? await connection?.send(.init(kind: .pong, body: message.body)) }
-                case .result, .pong: break
+                case .healthCheck:
+                    let provider = signingProvider
+                    Task { [weak self] in
+                        do {
+                            let response = try await UpdateHealth.response(to: message.body, target: target, provider: provider)
+                            guard let self else { return }
+                            try await self.send(.init(kind: .healthResponse, body: response), to: target.targetID)
+                        } catch {
+                            self?.lastError = "Update verification failed for \(target.displayName)."
+                        }
+                    }
+                case .result:
+                    try receiveHistoryReceipt(message.body, from: target)
+                case .pong: break
                 default: throw SynProtocolError.invalid("unexpected target message")
                 }
             } catch {
@@ -812,6 +861,10 @@ final class SynModel: ObservableObject {
             seenRequests.removeValue(forKey: request.id)
             throw error
         }
+        if !history.contains(where: { $0.id == request.id }) {
+            history.append(RequestHistoryEntry(request))
+            saveHistory()
+        }
         if servicesEnabled {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(max(0, request.expiresAt.timeIntervalSinceNow)))
@@ -822,7 +875,55 @@ final class SynModel: ObservableObject {
     }
 
     func pruneExpiredRequests() {
-        for request in pending where request.isExpired { finish(request) }
+        for request in pending where request.isExpired {
+            setHistory(request.id, status: .timedOut)
+            finish(request)
+        }
+        for entry in history where entry.completedAt == nil && entry.expiresAt <= .now {
+            setHistory(entry.id, status: .unconfirmed)
+        }
         seenRequests = seenRequests.filter { $0.value.expiresAt > .now }
     }
+    func selectTarget(_ targetID: String) {
+        showingSettings = false
+        selectedRequestID = nil
+        selectedTargetID = targetID
+    }
+
+    func history(for targetID: String) -> [RequestHistoryEntry] {
+        history.filter { $0.targetID == targetID }.sorted { $0.requestedAt > $1.requestedAt }
+    }
+
+    private func saveHistory() {
+        history = RequestHistoryStore.retained(history)
+        guard !historyLoadFailed else { return }
+        do { try historyStore?.save(history) }
+        catch { historyError = "Request history could not be saved. Approval behavior is unchanged." }
+    }
+
+    private func setHistory(_ id: String, status: RequestHistoryStatus, completed: Bool = true) {
+        guard let index = history.firstIndex(where: { $0.id == id }), !history[index].confirmed else { return }
+        history[index].status = status
+        history[index].completedAt = completed ? .now : nil
+        saveHistory()
+    }
+
+    func receiveHistoryReceipt(_ body: Data, from target: TargetRecord) throws {
+        let targetID = target.targetID
+        let receipt = try RequestResultReceipt(body, target: target)
+        let id = "\(targetID):\(receipt.requestID)"
+        guard let index = history.firstIndex(where: { $0.id == id }) else { return }
+        guard receipt.matches(history[index]) else { throw SynProtocolError.invalid("permission receipt does not match request") }
+        if history[index].confirmed {
+            guard history[index].status == receipt.status else { throw SynProtocolError.invalid("conflicting permission receipt") }
+            return
+        }
+        history[index].status = receipt.status
+        history[index].completedAt = receipt.completedAt
+        history[index].confirmed = receipt.status != .unconfirmed
+        history[index].targetSignatureVerified = true
+        if let request = pending.first(where: { $0.id == id }) { finish(request) }
+        saveHistory()
+    }
+
 }

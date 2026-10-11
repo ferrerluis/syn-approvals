@@ -101,7 +101,34 @@ Every WebSocket binary frame contains a canonical `WireMessageV1` map whose wire
 
 Kinds are hello, request, cancel, decision, result, ping, pong, error, and unavailable. Frames larger than 64 KiB are rejected.
 
-The root plug-in uses the same envelope over a Unix stream prefixed by a four-byte network-order length. Only request, cancel, decision, and unavailable/error messages are valid locally. The unprivileged relay can verify and relay messages but has no command-execution API and never holds the target authorization private key.
+The root plug-in uses the same envelope over a Unix stream prefixed by a four-byte network-order length. Requests, decisions, unavailable/errors, signed display-only results, and update health traffic are valid locally. The unprivileged relay can verify and relay messages but has no command-execution API and never holds the target authorization private key.
+
+## Observational permission receipts
+
+The existing `result` kind carries a target-signed COSE Sign1 envelope with a
+canonical eleven-key CBOR map: target ID (0), 16-byte request ID (1), 32-byte
+request payload hash (2), release ID (3), release commit (4), request time in
+Unix milliseconds (5), completion time (6), outcome (7), invoking UID (8),
+run-as UID (9), and domain `org.syn-approvals.permission-result.v1` (10).
+Outcomes are 1 approved, 2 denied, 3 timed out, 4 canceled, 5 failed, and
+6 unconfirmed. The privileged sender signs its own observation after independently
+validating the decision, expiry, cancellation, or failure. This is a permission
+outcome, not a command execution receipt or an authorization.
+
+The sender reports through a separate local connection with a 100-ms delivery
+budget, including after its original connection closes at timeout. Reporting
+failures are visible and never change approval, denial, deadlines, or PAM.
+The relay verifies the target signature and exact release before relaying the
+receipt; it never has the signing key. Its journal distinguishes `observation=relay`
+from `observation=target`. Relay-only observations cannot confirm Mac history.
+
+The Mac verifies the paired target signature and all request bindings before
+marking an entry confirmed. A cancellation notice only removes pending UI and
+leaves the outcome Unconfirmed until a signed result arrives. Neither receipts
+nor history can create requests, sign decisions, enter PAM, or execute commands.
+Reconnect does not fetch missed receipts. Identical results are harmless;
+conflicting confirmed results are rejected. Old unsigned relay confirmations
+are downgraded to Unconfirmed when loading history.
 
 ## State machine
 
@@ -123,6 +150,10 @@ A complete decision is signature- and binding-checked before expiry handling. Tr
 
 ## Compatibility
 
+Update health checks use wire kinds 10 (`health_check`) and 11 (`health_response`), only between identical releases. Their canonical CBOR payload has eight keys: 0 text domain `org.syn-approvals.update-health.v1`, 1 target ID, 2 fresh 32-byte nonce, 3 issue time in milliseconds, 4 fixed 10,000-ms TTL, 5 release ID, 6 release commit and 7 approval public-key SHA-256. The root helper signs the challenge with the target key; the Mac verifies it and signs the identical payload with its device/denial key. The relay and root helper verify the response against the live challenge and deadline.
+
+This text-domain payload cannot decode as a request or decision and never enters the sudo decision queue. It creates no permission-history entry or notification and grants no command authority. It proves the paired device can validate and return signed traffic, not that a user has authenticated or that the approval private key can sign. Routine updates retain protected original pairing evidence and record a separate private, release-bound health proof; they never fabricate or refresh user-presence approval evidence. First-time setup keeps its authenticated preflight checks.
+
 - A schema change requires a new protocol version unless every supported decoder can safely ignore it.
 - Unknown adapter kinds or schemas cannot be rendered or approved.
 - The current hello requires exactly version 2; it does not negotiate with version 1.
@@ -135,4 +166,4 @@ Each root-owned additional approver record binds one client TLS leaf certificate
 
 The first valid decision resolves one invocation. The relay broadcasts its existing `CANCEL` message to remove the request from other apps. Bounded terminal request hashes distinguish a legitimate competing response from malformed input; they never authorize another invocation.
 
-Envelope kind 10 is reserved and unsupported. Syn has no push registration message. Codex attention prompts are outside this protocol and cannot authorize an invocation.
+Envelope kinds 10 and 11 are update health checks and responses. Syn has no push registration message. Codex attention prompts are outside this protocol and cannot authorize an invocation.

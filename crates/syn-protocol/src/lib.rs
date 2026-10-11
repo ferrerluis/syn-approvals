@@ -99,6 +99,81 @@ pub mod message_kind {
     pub const PONG: u8 = 7;
     pub const ERROR: u8 = 8;
     pub const UNAVAILABLE: u8 = 9;
+    pub const HEALTH_CHECK: u8 = 10;
+    pub const HEALTH_RESPONSE: u8 = 11;
+}
+
+/// A non-authorizing update challenge. Its text domain cannot decode as an
+/// approval request or decision. The target signs it; the paired device key
+/// (never the user-presence approval key) signs the identical response.
+#[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct UpdateHealthV1 {
+    #[n(0)]
+    pub domain: String,
+    #[n(1)]
+    pub target_id: String,
+    #[n(2)]
+    pub nonce: ByteVec,
+    #[n(3)]
+    pub issued_at_unix_ms: i64,
+    #[n(4)]
+    pub ttl_ms: u32,
+    #[n(5)]
+    pub release_id: String,
+    #[n(6)]
+    pub release_commit: String,
+    #[n(7)]
+    pub approval_key_id: ByteVec,
+}
+
+impl UpdateHealthV1 {
+    pub const DOMAIN: &'static str = "org.syn-approvals.update-health.v1";
+    pub const TTL_MS: u32 = 10_000;
+
+    pub fn new(target_id: String, approval_key: &VerifyingKey) -> Self {
+        let mut nonce = [0; 32];
+        OsRng.fill_bytes(&mut nonce);
+        Self {
+            domain: Self::DOMAIN.into(),
+            target_id,
+            nonce: nonce.to_vec().into(),
+            issued_at_unix_ms: unix_time_ms(),
+            ttl_ms: Self::TTL_MS,
+            release_id: release_id().into(),
+            release_commit: release_commit().into(),
+            approval_key_id: key_id(approval_key).to_vec().into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_text("health target", &self.target_id, 128)?;
+        if self.domain != Self::DOMAIN
+            || self.nonce.len() != 32
+            || self.approval_key_id.len() != 32
+            || self.ttl_ms != Self::TTL_MS
+            || self.release_id != release_id()
+            || self.release_commit != release_commit()
+        {
+            return Err(validation("invalid update health challenge"));
+        }
+        Ok(())
+    }
+
+    pub fn is_live(&self, now: i64) -> bool {
+        self.issued_at_unix_ms <= now
+            && now.saturating_sub(self.issued_at_unix_ms) < i64::from(self.ttl_ms)
+    }
+}
+
+pub fn verify_update_health(
+    signed: &[u8],
+    key: &VerifyingKey,
+) -> Result<UpdateHealthV1, ProtocolError> {
+    let (payload, _) = verify_cose(signed, key)?;
+    let challenge: UpdateHealthV1 = decode_canonical(&payload)?;
+    challenge.validate()?;
+    Ok(challenge)
 }
 
 #[derive(Debug, Error)]
@@ -429,6 +504,82 @@ pub struct HelloV1 {
     pub release_commit: String,
 }
 
+/// Target-signed observation. Never accepted as an authorization decision.
+#[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct RequestResultV1 {
+    #[n(0)]
+    pub target_id: String,
+    #[n(1)]
+    pub request_id: ByteVec,
+    #[n(2)]
+    pub request_payload_hash: ByteVec,
+    #[n(3)]
+    pub release_id: String,
+    #[n(4)]
+    pub release_commit: String,
+    #[n(5)]
+    pub requested_at_unix_ms: i64,
+    #[n(6)]
+    pub completed_at_unix_ms: i64,
+    /// 1 approved, 2 denied, 3 timed out, 4 canceled, 5 failed, 6 unconfirmed.
+    #[n(7)]
+    pub outcome: u8,
+    #[n(8)]
+    pub invoking_uid: u32,
+    #[n(9)]
+    pub run_as_uid: u32,
+    #[n(10)]
+    pub domain: String,
+}
+
+impl RequestResultV1 {
+    pub fn for_request(request: &VerifiedRequest, outcome: u8, completed_at_unix_ms: i64) -> Self {
+        Self {
+            target_id: request.request.target_id.clone(),
+            request_id: request.request.request_id.clone(),
+            request_payload_hash: request.payload_hash.to_vec().into(),
+            release_id: request.request.release_id.clone(),
+            release_commit: request.request.release_commit.clone(),
+            requested_at_unix_ms: request.request.issued_at_unix_ms,
+            completed_at_unix_ms,
+            outcome,
+            invoking_uid: request.request.sudo.invoking_uid,
+            run_as_uid: request.request.sudo.run_as_uid,
+            domain: "org.syn-approvals.permission-result.v1".into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.target_id.is_empty()
+            || self.target_id.len() > 128
+            || self.request_id.len() != 16
+            || self.request_payload_hash.len() != 32
+            || self.domain != "org.syn-approvals.permission-result.v1"
+            || self.requested_at_unix_ms < 0
+            || self.completed_at_unix_ms < self.requested_at_unix_ms
+            || !(1..=6).contains(&self.outcome)
+            || self.release_id != release_id()
+            || self.release_commit != release_commit()
+        {
+            return Err(validation("invalid observational receipt"));
+        }
+        Ok(())
+    }
+}
+
+pub fn sign_result(receipt: &RequestResultV1, key: &SigningKey) -> Result<Vec<u8>, ProtocolError> {
+    receipt.validate()?;
+    sign_cose(&encode_canonical(receipt)?, key)
+}
+
+pub fn verify_result(signed: &[u8], key: &VerifyingKey) -> Result<RequestResultV1, ProtocolError> {
+    let (payload, _) = verify_cose(signed, key)?;
+    let receipt: RequestResultV1 = decode_canonical(&payload)?;
+    receipt.validate()?;
+    Ok(receipt)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
 #[cbor(map)]
 pub struct CancelV1 {
@@ -447,7 +598,7 @@ pub struct ErrorV1 {
 
 impl WireMessageV1 {
     pub fn new(kind: u8, body: Vec<u8>) -> Result<Self, ProtocolError> {
-        if !matches!(kind, 1..=10) {
+        if !matches!(kind, 1..=11) {
             return Err(validation("unknown wire message kind"));
         }
         let message = Self {
@@ -474,7 +625,7 @@ impl WireMessageV1 {
             return Err(ProtocolError::TooLarge);
         }
         let message: Self = decode_canonical(bytes)?;
-        if message.protocol_version != PROTOCOL_VERSION || !matches!(message.kind, 1..=10) {
+        if message.protocol_version != PROTOCOL_VERSION || !matches!(message.kind, 1..=11) {
             return Err(validation("unsupported wire message"));
         }
         Ok(message)
@@ -902,6 +1053,36 @@ mod tests {
     }
 
     #[test]
+    fn update_health_is_bound_expiring_and_never_an_authorization() {
+        let target = generate_signing_key();
+        let approval = generate_signing_key();
+        let device = generate_signing_key();
+        let mut check = UpdateHealthV1::new("pi-dev".into(), approval.verifying_key());
+        let bytes = encode_canonical(&check).unwrap();
+        let request = sign_cose(&bytes, &target).unwrap();
+        let response = sign_cose(&bytes, &device).unwrap();
+        assert_eq!(
+            verify_update_health(&request, target.verifying_key()).unwrap(),
+            check
+        );
+        assert_eq!(
+            verify_update_health(&response, device.verifying_key()).unwrap(),
+            check
+        );
+        assert!(verify_update_health(&response, approval.verifying_key()).is_err());
+        assert!(verify_decision(&response, device.verifying_key()).is_err());
+        assert!(verify_request(&request, target.verifying_key()).is_err());
+        assert!(check.is_live(check.issued_at_unix_ms + 9_999));
+        assert!(!check.is_live(check.issued_at_unix_ms + 10_000));
+        assert!(!check.is_live(check.issued_at_unix_ms - 1));
+        check.domain = "approval".into();
+        assert!(check.validate().is_err());
+        check.domain = UpdateHealthV1::DOMAIN.into();
+        check.release_commit = "1".repeat(40);
+        assert!(check.validate().is_err());
+    }
+
+    #[test]
     fn request_and_decision_round_trip() {
         let target_key = generate_signing_key();
         let approval_key = generate_signing_key();
@@ -1022,5 +1203,31 @@ mod tests {
         let message = WireMessageV1::new(message_kind::PING, b"nonce".to_vec()).unwrap();
         let encoded = message.encode().unwrap();
         assert_eq!(WireMessageV1::decode(&encoded).unwrap(), message);
+    }
+    #[test]
+    fn permission_receipts_require_target_signatures_and_cannot_authorize() {
+        let target = generate_signing_key();
+        let request =
+            ApprovalRequestV1::new("pi-dev".into(), target.verifying_key(), sample_intent());
+        let verified = verify_request(
+            &sign_request(&request, &target).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let receipt = RequestResultV1::for_request(&verified, 1, request.issued_at_unix_ms + 1);
+        let signed = sign_result(&receipt, &target).unwrap();
+        assert_eq!(
+            verify_result(&signed, target.verifying_key()).unwrap(),
+            receipt
+        );
+        assert!(
+            verify_result(&encode_canonical(&receipt).unwrap(), target.verifying_key()).is_err()
+        );
+        assert!(verify_result(&signed, generate_signing_key().verifying_key()).is_err());
+        assert!(verify_request(&signed, target.verifying_key()).is_err());
+        assert!(verify_decision(&signed, target.verifying_key()).is_err());
+        let mut forged = signed;
+        *forged.last_mut().unwrap() ^= 1;
+        assert!(verify_result(&forged, target.verifying_key()).is_err());
     }
 }

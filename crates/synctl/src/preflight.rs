@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use socket2::{Domain, SockAddr, Socket, Type};
 use syn_config::{approvers::ApproverRegistry, PluginConfig, Policy};
 use syn_protocol::message_kind;
@@ -21,6 +21,106 @@ use crate::{atomic_write, require_root};
 
 const PREFLIGHT_MARKER: &str = "/var/lib/syn/preflight-complete.json";
 const PAIRING_MARKER: &str = "/var/lib/syn/pairing-complete.json";
+const UPDATE_HEALTH_MARKER: &str = "/var/lib/syn/update-readiness.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateEvidence {
+    challenge_hex: String,
+    response_hex: String,
+    completed_at_unix_ms: i64,
+}
+
+/// Checks the device-authenticated channel without requesting a sudo decision
+/// or touching the user-presence approval key. Never writes approval evidence.
+pub(crate) fn test_update_health(config_path: &Path, record: bool) -> Result<()> {
+    require_root()?;
+    let config = PluginConfig::load(config_path)?;
+    config.validate()?;
+    crate::installer::validate_pairing_evidence(&config)?;
+    let target_pem = Zeroizing::new(fs::read_to_string(&config.target_private_key)?);
+    let key = syn_protocol::signing_key_from_pem(&target_pem)?;
+    let approval =
+        syn_protocol::verifying_key_from_pem(&fs::read_to_string(&config.approval_public_key)?)?;
+    let challenge = syn_protocol::UpdateHealthV1::new(config.target_id.clone(), &approval);
+    challenge.validate()?;
+    let deadline = Instant::now() + Duration::from_millis(u64::from(challenge.ttl_ms));
+    let signed = syn_protocol::sign_cose(&syn_protocol::encode_canonical(&challenge)?, &key)?;
+    let mut stream = connect_until(&config.agent_socket, deadline)?;
+    write_frame(
+        &mut stream,
+        &WireMessageV1::new(message_kind::HEALTH_CHECK, signed)?.encode()?,
+        deadline,
+    )?;
+    let response = WireMessageV1::decode(&read_frame(&mut stream, deadline)?)?;
+    if response.kind != message_kind::HEALTH_RESPONSE {
+        bail!("update health check did not receive a device response");
+    }
+    let evidence = UpdateEvidence {
+        challenge_hex: hex::encode(syn_protocol::encode_canonical(&challenge)?),
+        response_hex: hex::encode(response.body.as_slice()),
+        completed_at_unix_ms: syn_protocol::unix_time_ms(),
+    };
+    validate_health_evidence(&config, &evidence, evidence.completed_at_unix_ms)?;
+    remaining(deadline)?;
+    if record {
+        atomic_write(
+            Path::new(UPDATE_HEALTH_MARKER),
+            &serde_json::to_vec(&evidence)?,
+            0o600,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_update_evidence(config: &PluginConfig) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(UPDATE_HEALTH_MARKER)?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o077 != 0
+        || metadata.len() > 16 * 1024
+    {
+        bail!("update health evidence is not private and root-owned");
+    }
+    let evidence: UpdateEvidence = serde_json::from_slice(&fs::read(UPDATE_HEALTH_MARKER)?)?;
+    validate_health_evidence(config, &evidence, syn_protocol::unix_time_ms())
+}
+
+fn validate_health_evidence(
+    config: &PluginConfig,
+    evidence: &UpdateEvidence,
+    now: i64,
+) -> Result<()> {
+    let approval =
+        syn_protocol::verifying_key_from_pem(&fs::read_to_string(&config.approval_public_key)?)?;
+    let denial =
+        syn_protocol::verifying_key_from_pem(&fs::read_to_string(&config.denial_public_key)?)?;
+    validate_health_binding(evidence, &config.target_id, &approval, &denial, now)
+}
+
+fn validate_health_binding(
+    evidence: &UpdateEvidence,
+    target_id: &str,
+    approval: &p256::ecdsa::VerifyingKey,
+    denial: &p256::ecdsa::VerifyingKey,
+    now: i64,
+) -> Result<()> {
+    let response =
+        syn_protocol::verify_update_health(&hex::decode(&evidence.response_hex)?, denial)?;
+    let challenge: syn_protocol::UpdateHealthV1 =
+        syn_protocol::decode_canonical(&hex::decode(&evidence.challenge_hex)?)?;
+    if response != challenge
+        || response.target_id != target_id
+        || response.approval_key_id.as_slice() != syn_protocol::key_id(approval)
+        || !response.is_live(evidence.completed_at_unix_ms)
+        || evidence.completed_at_unix_ms > now
+        || now.saturating_sub(evidence.completed_at_unix_ms) > 1_800_000
+    {
+        bail!("update health evidence does not match a recent check of this pairing");
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalTestReport {
@@ -360,6 +460,45 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use p256::ecdsa::SigningKey;
+
+    #[test]
+    fn update_evidence_rejects_stale_future_wrong_pairing_nonce_and_authorization() {
+        let approval = SigningKey::from_slice(&[2; 32]).unwrap();
+        let device = SigningKey::from_slice(&[3; 32]).unwrap();
+        let check = syn_protocol::UpdateHealthV1::new("pi-dev".into(), approval.verifying_key());
+        let payload = syn_protocol::encode_canonical(&check).unwrap();
+        let mut evidence = UpdateEvidence {
+            challenge_hex: hex::encode(&payload),
+            response_hex: hex::encode(syn_protocol::sign_cose(&payload, &device).unwrap()),
+            completed_at_unix_ms: check.issued_at_unix_ms + 1,
+        };
+        let now = evidence.completed_at_unix_ms;
+        let evaluate = |evidence: &UpdateEvidence, target, key, time| {
+            validate_health_binding(evidence, target, key, device.verifying_key(), time)
+        };
+        assert!(evaluate(&evidence, "pi-dev", approval.verifying_key(), now).is_ok());
+        assert!(evaluate(&evidence, "other", approval.verifying_key(), now).is_err());
+        assert!(evaluate(&evidence, "pi-dev", device.verifying_key(), now).is_err());
+        assert!(evaluate(&evidence, "pi-dev", approval.verifying_key(), now - 1).is_err());
+        assert!(evaluate(
+            &evidence,
+            "pi-dev",
+            approval.verifying_key(),
+            now + 1_800_001
+        )
+        .is_err());
+        evidence.completed_at_unix_ms = check.issued_at_unix_ms + 10_000;
+        assert!(evaluate(&evidence, "pi-dev", approval.verifying_key(), now + 10_000).is_err());
+        evidence.completed_at_unix_ms = now;
+        let mut other = check;
+        other.nonce = vec![9; 32].into();
+        evidence.challenge_hex = hex::encode(syn_protocol::encode_canonical(&other).unwrap());
+        assert!(evaluate(&evidence, "pi-dev", approval.verifying_key(), now).is_err());
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
+        evidence.response_hex = fixture["signed_denial_hex"].as_str().unwrap().into();
+        assert!(evaluate(&evidence, "pi-dev", approval.verifying_key(), now).is_err());
+    }
 
     #[test]
     fn requester_rejects_late_denied_modified_wrong_target_and_replayed_decisions() {

@@ -118,6 +118,8 @@ struct OnboardingJournal {
     package_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery_deadline_unix_seconds: Option<u64>,
+    #[serde(default)]
+    paired_update: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -141,6 +143,8 @@ pub struct PairingReport {
 pub struct ActivationReport {
     pub operation_id: String,
     pub release_id: String,
+    // Legacy maintenance response field: this setup transition was verified.
+    // A device-health result is never a sudo approval decision.
     pub approved: bool,
     pub recovery_armed: bool,
     pub phase: &'static str,
@@ -421,6 +425,7 @@ fn prepare_from(
             helper_size_bytes: request.helper_size_bytes,
             package_sha256: None,
             recovery_deadline_unix_seconds: None,
+            paired_update: false,
         };
         write_new_root_file(
             &staging_directory.join("journal.json"),
@@ -706,6 +711,18 @@ pub fn configure(operation_id: &str, apply: bool) -> Result<PairingReport> {
         bail!("restore ordinary password sudo before installing an update");
     }
     crate::recovery_timer::prepare_helper(&operation.join(BOOTSTRAP_HELPER_NAME))?;
+    // Determine this from protected retained evidence, never a client flag.
+    // Identity changes remain rejected by configure_identities below.
+    journal.paired_update = Path::new("/var/lib/syn/pairing-complete.json").exists();
+    if journal.paired_update {
+        let previous = syn_config::PluginConfig::load(DEFAULT_PLUGIN_CONFIG)?;
+        previous.validate()?;
+        crate::installer::validate_pairing_evidence(&previous)?;
+        if previous.target_id != request.target_id || previous.managed_user != request.managed_user
+        {
+            bail!("update does not match the retained pairing");
+        }
+    }
     run_quiet(
         "/usr/bin/dpkg",
         &[
@@ -815,7 +832,11 @@ pub fn activate(operation_id: &str, apply: bool) -> Result<ActivationReport> {
             require_operation_recovery_timer(&journal)?;
         }
     }
-    crate::preflight::test_approval(Path::new(DEFAULT_PLUGIN_CONFIG), true)?;
+    if journal.paired_update {
+        crate::preflight::test_update_health(Path::new(DEFAULT_PLUGIN_CONFIG), true)?;
+    } else {
+        crate::preflight::test_approval(Path::new(DEFAULT_PLUGIN_CONFIG), true)?;
+    }
     if journal.phase == "paired_pending_approval" {
         let current = crate::recovery_timer::status();
         let deadline = if current.armed {
@@ -910,7 +931,11 @@ pub fn complete(operation_id: &str, apply: bool) -> Result<CompletionReport> {
     }
     if completion_step(&journal.phase)? == CompletionStep::Verify {
         require_operation_recovery_timer(&journal)?;
-        crate::preflight::test_approval(Path::new(DEFAULT_PLUGIN_CONFIG), false)?;
+        if journal.paired_update {
+            crate::preflight::test_update_health(Path::new(DEFAULT_PLUGIN_CONFIG), false)?;
+        } else {
+            crate::preflight::test_approval(Path::new(DEFAULT_PLUGIN_CONFIG), false)?;
+        }
         let _transition = crate::recovery_worker::TransitionLock::acquire()?;
         crate::installer::check_installed_coupling(Path::new(DEFAULT_INSTALL_STATE))?;
         verify_installed_release(&request)?;

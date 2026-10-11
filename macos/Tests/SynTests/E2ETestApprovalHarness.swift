@@ -843,7 +843,7 @@ final class E2EScenarioSigner: DecisionSigning, @unchecked Sendable {
     }
 }
 
-final class E2EScenarioSigningProvider: DecisionSignerProviding, @unchecked Sendable {
+final class E2EScenarioSigningProvider: UpdateHealthSigning, @unchecked Sendable {
     private let inbox: E2EGrantInbox
     private let keys: E2EDisposableKeyStore
     private let lock = NSLock()
@@ -855,6 +855,10 @@ final class E2EScenarioSigningProvider: DecisionSignerProviding, @unchecked Send
     }
 
     func publicIdentities() throws -> (approval: Data, denial: Data) { keys.publicIdentities }
+
+    func signUpdateHealth(payload: Data) throws -> (keyID: Data, signature: Data) {
+        (Data(SHA256.hash(data: keys.publicIdentities.denial)), try keys.denialSignature(for: payload))
+    }
 
     func signer(for request: VerifiedApprovalRequest) throws -> any DecisionSigning {
         try lock.withLock {
