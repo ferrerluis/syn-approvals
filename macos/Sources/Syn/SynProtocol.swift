@@ -11,6 +11,7 @@ enum SynProtocolError: Error, LocalizedError {
 
 enum SynMessageKind: UInt8, Sendable {
     case hello = 1, request = 2, cancel = 3, decision = 4, result = 5, ping = 6, pong = 7, error = 8, unavailable = 9
+    case healthCheck = 10, healthResponse = 11
 }
 
 struct WireMessage: Sendable {
@@ -208,7 +209,7 @@ enum SynProtocol {
         }
     }
 
-    private static func currentReleaseIdentity() throws -> (id: String, commit: String) {
+    static func currentReleaseIdentity() throws -> (id: String, commit: String) {
         let identity = ReleaseIdentity.current
 #if DEBUG
         if identity.releaseID == ReleaseIdentity.developmentID {
@@ -248,7 +249,7 @@ enum SynProtocol {
         ]))
     }
 
-    private static func verifyCOSE(_ signed: Data, key: P256.Signing.PublicKey) throws -> (Data, Data) {
+    static func verifyCOSE(_ signed: Data, key: P256.Signing.PublicKey) throws -> (Data, Data) {
         guard signed.count <= 65_536,
               case let .tag(18, tagged) = try CBORCodec.decodeCanonical(signed),
               let values = tagged.arrayValue, values.count == 4,

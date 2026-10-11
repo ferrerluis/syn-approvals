@@ -142,6 +142,10 @@ A complete decision is signature- and binding-checked before expiry handling. Tr
 
 ## Compatibility
 
+Update health checks use wire kinds 10 (`health_check`) and 11 (`health_response`), only between identical releases. Their canonical CBOR payload has eight keys: 0 text domain `org.syn-approvals.update-health.v1`, 1 target ID, 2 fresh 32-byte nonce, 3 issue time in milliseconds, 4 fixed 10,000-ms TTL, 5 release ID, 6 release commit and 7 approval public-key SHA-256. The root helper signs the challenge with the target key; the Mac verifies it and signs the identical payload with its device/denial key. The relay and root helper verify the response against the live challenge and deadline.
+
+This text-domain payload cannot decode as a request or decision and never enters the sudo decision queue. It creates no permission-history entry or notification and grants no command authority. It proves the paired device can validate and return signed traffic, not that a user has authenticated or that the approval private key can sign. Routine updates retain protected original pairing evidence and record a separate private, release-bound health proof; they never fabricate or refresh user-presence approval evidence. First-time setup keeps its authenticated preflight checks.
+
 - A schema change requires a new protocol version unless every supported decoder can safely ignore it.
 - Unknown adapter kinds or schemas cannot be rendered or approved.
 - The current hello requires exactly version 2; it does not negotiate with version 1.

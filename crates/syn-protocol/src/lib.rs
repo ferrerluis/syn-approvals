@@ -99,6 +99,81 @@ pub mod message_kind {
     pub const PONG: u8 = 7;
     pub const ERROR: u8 = 8;
     pub const UNAVAILABLE: u8 = 9;
+    pub const HEALTH_CHECK: u8 = 10;
+    pub const HEALTH_RESPONSE: u8 = 11;
+}
+
+/// A non-authorizing update challenge. Its text domain cannot decode as an
+/// approval request or decision. The target signs it; the paired device key
+/// (never the user-presence approval key) signs the identical response.
+#[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct UpdateHealthV1 {
+    #[n(0)]
+    pub domain: String,
+    #[n(1)]
+    pub target_id: String,
+    #[n(2)]
+    pub nonce: ByteVec,
+    #[n(3)]
+    pub issued_at_unix_ms: i64,
+    #[n(4)]
+    pub ttl_ms: u32,
+    #[n(5)]
+    pub release_id: String,
+    #[n(6)]
+    pub release_commit: String,
+    #[n(7)]
+    pub approval_key_id: ByteVec,
+}
+
+impl UpdateHealthV1 {
+    pub const DOMAIN: &'static str = "org.syn-approvals.update-health.v1";
+    pub const TTL_MS: u32 = 10_000;
+
+    pub fn new(target_id: String, approval_key: &VerifyingKey) -> Self {
+        let mut nonce = [0; 32];
+        OsRng.fill_bytes(&mut nonce);
+        Self {
+            domain: Self::DOMAIN.into(),
+            target_id,
+            nonce: nonce.to_vec().into(),
+            issued_at_unix_ms: unix_time_ms(),
+            ttl_ms: Self::TTL_MS,
+            release_id: release_id().into(),
+            release_commit: release_commit().into(),
+            approval_key_id: key_id(approval_key).to_vec().into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_text("health target", &self.target_id, 128)?;
+        if self.domain != Self::DOMAIN
+            || self.nonce.len() != 32
+            || self.approval_key_id.len() != 32
+            || self.ttl_ms != Self::TTL_MS
+            || self.release_id != release_id()
+            || self.release_commit != release_commit()
+        {
+            return Err(validation("invalid update health challenge"));
+        }
+        Ok(())
+    }
+
+    pub fn is_live(&self, now: i64) -> bool {
+        self.issued_at_unix_ms <= now
+            && now.saturating_sub(self.issued_at_unix_ms) < i64::from(self.ttl_ms)
+    }
+}
+
+pub fn verify_update_health(
+    signed: &[u8],
+    key: &VerifyingKey,
+) -> Result<UpdateHealthV1, ProtocolError> {
+    let (payload, _) = verify_cose(signed, key)?;
+    let challenge: UpdateHealthV1 = decode_canonical(&payload)?;
+    challenge.validate()?;
+    Ok(challenge)
 }
 
 #[derive(Debug, Error)]
@@ -505,7 +580,7 @@ pub struct ErrorV1 {
 
 impl WireMessageV1 {
     pub fn new(kind: u8, body: Vec<u8>) -> Result<Self, ProtocolError> {
-        if !matches!(kind, 1..=10) {
+        if !matches!(kind, 1..=11) {
             return Err(validation("unknown wire message kind"));
         }
         let message = Self {
@@ -532,7 +607,7 @@ impl WireMessageV1 {
             return Err(ProtocolError::TooLarge);
         }
         let message: Self = decode_canonical(bytes)?;
-        if message.protocol_version != PROTOCOL_VERSION || !matches!(message.kind, 1..=10) {
+        if message.protocol_version != PROTOCOL_VERSION || !matches!(message.kind, 1..=11) {
             return Err(validation("unsupported wire message"));
         }
         Ok(message)
@@ -957,6 +1032,36 @@ mod tests {
         ] {
             assert!(validate_release_id(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn update_health_is_bound_expiring_and_never_an_authorization() {
+        let target = generate_signing_key();
+        let approval = generate_signing_key();
+        let device = generate_signing_key();
+        let mut check = UpdateHealthV1::new("pi-dev".into(), approval.verifying_key());
+        let bytes = encode_canonical(&check).unwrap();
+        let request = sign_cose(&bytes, &target).unwrap();
+        let response = sign_cose(&bytes, &device).unwrap();
+        assert_eq!(
+            verify_update_health(&request, target.verifying_key()).unwrap(),
+            check
+        );
+        assert_eq!(
+            verify_update_health(&response, device.verifying_key()).unwrap(),
+            check
+        );
+        assert!(verify_update_health(&response, approval.verifying_key()).is_err());
+        assert!(verify_decision(&response, device.verifying_key()).is_err());
+        assert!(verify_request(&request, target.verifying_key()).is_err());
+        assert!(check.is_live(check.issued_at_unix_ms + 9_999));
+        assert!(!check.is_live(check.issued_at_unix_ms + 10_000));
+        assert!(!check.is_live(check.issued_at_unix_ms - 1));
+        check.domain = "approval".into();
+        assert!(check.validate().is_err());
+        check.domain = UpdateHealthV1::DOMAIN.into();
+        check.release_commit = "1".repeat(40);
+        assert!(check.validate().is_err());
     }
 
     #[test]

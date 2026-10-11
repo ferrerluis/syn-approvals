@@ -700,6 +700,17 @@ final class SynModel: ObservableObject {
                 case .ping:
                     let connection = connections[target.targetID]
                     Task { try? await connection?.send(.init(kind: .pong, body: message.body)) }
+                case .healthCheck:
+                    let provider = signingProvider
+                    Task { [weak self] in
+                        do {
+                            let response = try await UpdateHealth.response(to: message.body, target: target, provider: provider)
+                            guard let self else { return }
+                            try await self.send(.init(kind: .healthResponse, body: response), to: target.targetID)
+                        } catch {
+                            self?.lastError = "Update verification failed for \(target.displayName)."
+                        }
+                    }
                 case .result:
                     try receiveHistoryReceipt(message.body, targetID: target.targetID)
                 case .pong: break

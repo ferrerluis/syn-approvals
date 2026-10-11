@@ -56,7 +56,7 @@ Syn's setup flow is:
 2. It verifies that the Mac app, ARM64 helper, and source archive carry the same compact UTC release ID and exact Git commit.
 3. On first setup, it transfers the helper and shows the one-time command. Run it in a trusted remote administrator session, then click **I've run the command — continue**. The command verifies the helper's root-owned copy before authorizing the restricted maintenance key; future updates reuse that access.
 4. The remote builds as a locked non-administrator account, installs the exact package, preserves or creates identities, and returns a certificate-pinned profile over SSH.
-5. A signed preflight approval succeeds before Syn changes sudo. A local reboot-persistent recovery deadline remains armed until a second, fresh approval verifies the exact live release and sudo configuration.
+5. First setup uses signed approval checks before activation and completion. Updates of an already-paired machine instead use silent, signed device health checks before activating the new sudo setup and before disabling automatic recovery. These checks cannot approve a command; every real approval still requires fresh macOS authentication.
 
 Only the remote machine's public profile returns to the Mac. The target authorization private key stays remote; Mac authorization keys and the client identity stay in Keychain or the Secure Enclave.
 

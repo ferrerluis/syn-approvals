@@ -143,13 +143,31 @@ fn validate_staged_security_state(user: &str, uid: Option<u32>) -> Result<()> {
     {
         bail!("requested, plug-in, and policy managed identities differ");
     }
+    validate_pairing_evidence(&plugin)?;
+    let preflight: serde_json::Value = serde_json::from_slice(&fs::read(PREFLIGHT_MARKER)?)?;
+    let completed = preflight["completed_at_unix_ms"]
+        .as_i64()
+        .context("preflight completion time is missing")?;
+    let now = syn_protocol::unix_time_ms();
+    if completed > now {
+        bail!("signed preflight is from the future");
+    }
+    if now - completed > 1_800_000 {
+        crate::preflight::validate_update_evidence(&plugin)?;
+    }
+    Ok(())
+}
+
+/// Existing root-owned pairing evidence is retained during updates. Checking
+/// its identity is separate from requiring a fresh user-presence signature.
+pub(crate) fn validate_pairing_evidence(plugin: &PluginConfig) -> Result<()> {
     let preflight: serde_json::Value = serde_json::from_slice(&fs::read(PREFLIGHT_MARKER)?)?;
     let pairing: serde_json::Value = serde_json::from_slice(&fs::read(PAIRING_MARKER)?)?;
     if preflight != pairing
         || preflight["schema_version"] != 1
         || preflight["target_id"] != plugin.target_id
         || !crate::preflight::trusted_approval_key_id(
-            &plugin,
+            plugin,
             preflight["approver_key_id"]
                 .as_str()
                 .context("preflight approver key ID missing")?,
@@ -157,13 +175,6 @@ fn validate_staged_security_state(user: &str, uid: Option<u32>) -> Result<()> {
         || preflight["test_executable"] != "/usr/bin/true"
     {
         bail!("pairing and signed preflight evidence do not match current keys");
-    }
-    let completed = preflight["completed_at_unix_ms"]
-        .as_i64()
-        .context("preflight completion time is missing")?;
-    let now = syn_protocol::unix_time_ms();
-    if completed > now || now - completed > 1_800_000 {
-        bail!("signed preflight is older than 30 minutes or from the future");
     }
     for path in [PREFLIGHT_MARKER, PAIRING_MARKER] {
         let metadata = fs::metadata(path)?;

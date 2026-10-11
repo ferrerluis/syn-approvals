@@ -18,9 +18,9 @@ use sha2::{Digest, Sha256};
 use syn_config::{approvers::ApproverRegistry, AgentConfig};
 use syn_protocol::message_kind;
 use syn_protocol::{
-    encode_canonical, verify_decision, verify_request, AuthenticationClass, CancelV1,
-    DecisionAction, ErrorV1, HelloV1, RequestResultV1, VerifiedDecision, VerifiedRequest,
-    WireMessageV1, MAX_WIRE_BYTES, PROTOCOL_VERSION,
+    encode_canonical, verify_decision, verify_request, verify_update_health, AuthenticationClass,
+    CancelV1, DecisionAction, ErrorV1, HelloV1, RequestResultV1, UpdateHealthV1, VerifiedDecision,
+    VerifiedRequest, WireMessageV1, MAX_WIRE_BYTES, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -77,15 +77,21 @@ impl BoundApprover {
 struct AgentState {
     target_id: String,
     target_key: VerifyingKey,
-    #[cfg(test)]
     approval_key: VerifyingKey,
-    #[cfg(test)]
     denial_key: VerifyingKey,
     approvers: Vec<BoundApprover>,
     max_pending: usize,
     pending: Mutex<HashMap<String, PendingRequest>>,
     resolved: Mutex<HashMap<String, ([u8; 32], Instant)>>,
+    health: Mutex<HashMap<String, PendingHealth>>,
     event_tx: broadcast::Sender<WireMessageV1>,
+}
+
+struct PendingHealth {
+    challenge: UpdateHealthV1,
+    signed: Vec<u8>,
+    deadline: Instant,
+    response: oneshot::Sender<Vec<u8>>,
 }
 
 struct PendingRequest {
@@ -139,14 +145,13 @@ impl Agent {
             state: Arc::new(AgentState {
                 target_id: config.target_id.clone(),
                 target_key,
-                #[cfg(test)]
                 approval_key,
-                #[cfg(test)]
                 denial_key,
                 approvers,
                 max_pending: config.max_pending,
                 pending: Mutex::new(HashMap::new()),
                 resolved: Mutex::new(HashMap::new()),
+                health: Mutex::new(HashMap::new()),
                 event_tx,
             }),
             config,
@@ -286,6 +291,9 @@ async fn handle_local(
             .await
         }
     };
+    if message.kind == message_kind::HEALTH_CHECK {
+        return handle_health(&mut stream, state, message.body.to_vec()).await;
+    }
     if message.kind != message_kind::REQUEST {
         return write_hard_error(
             &mut stream,
@@ -419,6 +427,87 @@ fn unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+async fn handle_health(
+    stream: &mut UnixStream,
+    state: Arc<AgentState>,
+    signed: Vec<u8>,
+) -> Result<()> {
+    let challenge = verify_update_health(&signed, &state.target_key)?;
+    if challenge.target_id != state.target_id
+        || !challenge.is_live(unix_ms())
+        || challenge.approval_key_id.as_slice() != syn_protocol::key_id(&state.approval_key)
+    {
+        bail!("health challenge does not match this live pairing");
+    }
+    let id = hex::encode(challenge.nonce.as_slice());
+    let remaining = Duration::from_millis(
+        (challenge.issued_at_unix_ms + i64::from(challenge.ttl_ms) - unix_ms()).max(0) as u64,
+    );
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut health = state.health.lock().await;
+        if health.len() >= 4 || health.contains_key(&id) {
+            bail!("health queue full or duplicate nonce");
+        }
+        health.insert(
+            id.clone(),
+            PendingHealth {
+                challenge,
+                signed: signed.clone(),
+                deadline: Instant::now() + remaining,
+                response: tx,
+            },
+        );
+    }
+    let _ = state
+        .event_tx
+        .send(WireMessageV1::new(message_kind::HEALTH_CHECK, signed)?);
+    let response = tokio::select! {
+        value = rx => value.ok(),
+        _ = tokio::time::sleep(remaining) => None,
+        _ = stream.read_u8() => None,
+    };
+    state.health.lock().await.remove(&id);
+    match response {
+        Some(bytes) => {
+            write_frame(
+                stream,
+                &WireMessageV1::new(message_kind::HEALTH_RESPONSE, bytes)?.encode()?,
+            )
+            .await
+        }
+        None => {
+            write_unavailable(
+                stream,
+                "health_expired",
+                "update health check did not complete",
+            )
+            .await
+        }
+    }
+}
+
+async fn route_health(signed: &[u8], state: &AgentState) -> Result<()> {
+    let response = verify_update_health(signed, &state.denial_key)?;
+    let id = hex::encode(response.nonce.as_slice());
+    let mut health = state.health.lock().await;
+    // Late and duplicate responses are harmless; they never touch sudo requests.
+    let Some(pending) = health.get(&id) else {
+        return Ok(());
+    };
+    if pending.deadline <= Instant::now() || !pending.challenge.is_live(unix_ms()) {
+        health.remove(&id);
+        return Ok(());
+    }
+    if response != pending.challenge {
+        bail!("health response does not match live challenge");
+    }
+    if let Some(pending) = health.remove(&id) {
+        let _ = pending.response.send(signed.to_vec());
+    }
+    Ok(())
 }
 
 fn history_deadline(request: &VerifiedRequest, now_ms: i64, now: Instant) -> Instant {
@@ -569,6 +658,21 @@ async fn handle_network(
         )
         .await?;
     }
+    let checks: Vec<Vec<u8>> = state
+        .health
+        .lock()
+        .await
+        .values()
+        .filter(|check| check.deadline > Instant::now())
+        .map(|check| check.signed.clone())
+        .collect();
+    for check in checks {
+        send_wire(
+            &mut websocket,
+            WireMessageV1::new(message_kind::HEALTH_CHECK, check)?,
+        )
+        .await?;
+    }
 
     loop {
         tokio::select! {
@@ -593,6 +697,18 @@ async fn handle_network(
                             }
                         };
                         match message.kind {
+                            message_kind::HEALTH_RESPONSE => {
+                                // Updates belong to the primary Mac identity. A phone
+                                // cannot relay a copied Mac response on its connection.
+                                if peer.approval_key != state.approval_key || peer.denial_key != state.denial_key {
+                                    hard_fail_pending(&state).await;
+                                    bail!("health response came from a different paired device");
+                                }
+                                if let Err(error) = route_health(message.body.as_slice(), &state).await {
+                                    hard_fail_pending(&state).await;
+                                    return Err(error);
+                                }
+                            },
                             message_kind::DECISION => {
                                 if let Err(error) = route_bound_decision(message.body.as_slice(), &state, &peer).await {
                                     if !error.is::<ResolvedDecision>() { hard_fail_pending(&state).await; }
@@ -918,6 +1034,7 @@ mod tests {
             denial_key: *denial.verifying_key(),
             approvers: vec![],
             max_pending: 4,
+            health: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::from([(
                 hex::encode(verified.request.request_id.as_slice()),
                 PendingRequest {
@@ -932,6 +1049,49 @@ mod tests {
             event_tx,
         });
         (state, verified, approval, response_rx)
+    }
+
+    #[tokio::test]
+    async fn health_response_is_one_use_bound_and_separate_from_pending_sudo() {
+        let (mut state, _, approval, _) = state_with_pending().await;
+        let device = generate_signing_key();
+        Arc::get_mut(&mut state).unwrap().denial_key = *device.verifying_key();
+        let check = UpdateHealthV1::new("pi-dev".into(), approval.verifying_key());
+        let id = hex::encode(check.nonce.as_slice());
+        let (tx, rx) = oneshot::channel();
+        state.health.lock().await.insert(
+            id.clone(),
+            PendingHealth {
+                challenge: check.clone(),
+                signed: vec![],
+                deadline: Instant::now() + Duration::from_secs(10),
+                response: tx,
+            },
+        );
+        let sign = |check: &UpdateHealthV1| {
+            syn_protocol::sign_cose(&encode_canonical(check).unwrap(), &device).unwrap()
+        };
+        let mut wrong = check.clone();
+        wrong.target_id = "wrong-target".into();
+        assert!(route_health(&sign(&wrong), &state).await.is_err());
+        let signed = sign(&check);
+        route_health(&signed, &state).await.unwrap();
+        assert_eq!(rx.await.unwrap(), signed);
+        route_health(&signed, &state).await.unwrap();
+        assert!(state.health.lock().await.is_empty());
+        assert_eq!(state.pending.lock().await.len(), 1);
+        let (tx, _) = oneshot::channel();
+        state.health.lock().await.insert(
+            id,
+            PendingHealth {
+                challenge: check,
+                signed: vec![],
+                deadline: Instant::now(),
+                response: tx,
+            },
+        );
+        route_health(&signed, &state).await.unwrap();
+        assert!(state.health.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -979,8 +1139,11 @@ mod tests {
                 target_key: *target.verifying_key(),
                 approval_key: *approver.verifying_key(),
                 denial_key: *approver.verifying_key(),
+                approvers: vec![],
+                resolved: Mutex::new(HashMap::new()),
                 max_pending: 4,
                 pending: Mutex::new(HashMap::new()),
+                health: Mutex::new(HashMap::new()),
                 event_tx,
             });
             let (server, mut client) = UnixStream::pair().unwrap();
@@ -1000,6 +1163,9 @@ mod tests {
             assert_eq!(response.kind, message_kind::DECISION);
             assert_eq!(response.body.as_slice(), signed_decision);
             task.await.unwrap().unwrap();
+            // Other paired reviewers close their pending UI before the sender
+            // receives a display-only result for the completed invocation.
+            assert_eq!(event_rx.recv().await.unwrap().kind, message_kind::CANCEL);
             let event = event_rx.recv().await.unwrap();
             assert_eq!(event.kind, message_kind::RESULT);
             let receipt: RequestResultV1 = syn_protocol::decode_canonical(&event.body).unwrap();
@@ -1048,6 +1214,7 @@ mod tests {
             max_pending: 4,
             pending: Mutex::new(HashMap::new()),
             resolved: Mutex::new(HashMap::new()),
+            health: Mutex::new(HashMap::new()),
             event_tx,
         });
         let (server, mut client) = UnixStream::pair().unwrap();
@@ -1092,6 +1259,7 @@ mod tests {
                 max_pending: 4,
                 pending: Mutex::new(HashMap::new()),
                 resolved: Mutex::new(HashMap::new()),
+                health: Mutex::new(HashMap::new()),
                 event_tx,
             });
             let mut request =
@@ -1315,7 +1483,7 @@ mod tests {
         route_bound_decision(&bytes, &state, &peer).await.unwrap();
         assert!(matches!(
             receiver.await.unwrap(),
-            LocalResponse::Decision(_)
+            LocalResponse::Decision(_, _)
         ));
     }
     #[tokio::test]
@@ -1334,7 +1502,7 @@ mod tests {
         assert_eq!(event.kind, message_kind::CANCEL);
         assert!(matches!(
             receiver.await.unwrap(),
-            LocalResponse::Decision(_)
+            LocalResponse::Decision(_, _)
         ));
         let error = route_decision(&bytes, &state).await.unwrap_err();
         assert!(error.is::<ResolvedDecision>());

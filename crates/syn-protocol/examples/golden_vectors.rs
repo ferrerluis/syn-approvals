@@ -97,7 +97,13 @@ fn main() {
     denial_decision.release_id = syn_protocol::DEVELOPMENT_RELEASE_ID.into();
     denial_decision.release_commit = syn_protocol::DEVELOPMENT_RELEASE_COMMIT.into();
 
+    let mut health = syn_protocol::UpdateHealthV1::new("pi-dev".into(), approval.verifying_key());
+    health.nonce = vec![7; 32].into();
+    health.issued_at_unix_ms = 1_700_000_000_000;
+    let health_payload = syn_protocol::encode_canonical(&health).unwrap();
     let output = json!({
+        "signed_health_check_hex": hex::encode(syn_protocol::sign_cose(&health_payload, &target).unwrap()),
+        "signed_health_response_hex": hex::encode(syn_protocol::sign_cose(&health_payload, &denial).unwrap()),
         "schema_version": 1,
         "approved_result_hex": hex::encode(syn_protocol::encode_canonical(
             &RequestResultV1::for_request(&verified, 1, 1_700_000_001_000)).unwrap()),

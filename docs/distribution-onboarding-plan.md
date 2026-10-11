@@ -45,6 +45,8 @@ Generate the ID once, prevent collisions and never replace an existing release's
 4. Only matching versions may process Syn approvals. Authenticate and enforce that match on the remote side too, not just in the Mac UI.
 5. Offline or failed machines remain unavailable for Syn approvals until updated. Retry when reachable, requesting fresh credentials if needed; do not silently authorize future privileged work.
 
+Routine updates of already-paired machines use background health checks rather than the two setup fingerprint requests. The target signs a fresh, short-lived challenge bound to its identity, the exact release and the paired approval public key. The Mac validates it and signs the same health payload with its separate device/denial key, without using the user-presence approval key. The root helper verifies the response before activation and again before disarming recovery. Missing, invalid or expired responses stop the update; automatic recovery remains available. First-time pairing retains its existing authenticated approval checks.
+
 Opening a newly installed Mac version also detects mismatches and offers the required remote updates. There is no independent Ubuntu “upgrade to latest” user workflow. Keep local recovery and uninstall available if the Mac is lost; root can still manually change the machine, so identical installed versions cannot be guaranteed at every moment.
 
 No cross-version approval compatibility matrix is required. The small SSH maintenance interface must still recognize older installed versions and recovery records so it can safely upgrade them. Do not add a privileged network updater.
