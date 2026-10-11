@@ -15,9 +15,9 @@ use socket2::{Domain, SockAddr, Socket, Type};
 use syn_config::{PluginConfig, Policy, DEFAULT_PLUGIN_CONFIG};
 use syn_protocol::message_kind;
 use syn_protocol::{
-    digest_environment, sign_request, sorted_environment_names, verify_decision, verify_request,
-    ApprovalRequestV1, AuthenticationClass, CommandInfoEntry, DecisionAction, SudoIntentV1,
-    VerifiedRequest, WireMessageV1, MAX_WIRE_BYTES,
+    digest_environment, sign_request, sign_result, sorted_environment_names, verify_decision,
+    verify_request, ApprovalRequestV1, AuthenticationClass, CommandInfoEntry, DecisionAction,
+    RequestResultV1, SudoIntentV1, VerifiedRequest, WireMessageV1, MAX_WIRE_BYTES,
 };
 use zeroize::Zeroizing;
 
@@ -329,9 +329,25 @@ unsafe extern "C" fn plugin_check(
         // Restore sudo's signal handlers before any PAM conversation. A
         // canceled wait is final and must never become password fallback.
         if signals.finish() {
+            report_result(&config.agent_socket, &verified_request, &target_key, 4);
             hard_notice("Syn invocation canceled. Nothing was approved.\n");
             return Ok(0);
         }
+        let category = match &outcome {
+            Ok(DecisionOutcome::Approve) => 1,
+            Ok(DecisionOutcome::Deny) => 2,
+            Ok(DecisionOutcome::Expired) => 3,
+            Ok(DecisionOutcome::PasswordRequested) => 4,
+            Err(_) => 5,
+        };
+        // Observe the independently validated result before entering PAM or
+        // returning to sudo. Receipt delivery never changes authorization.
+        report_result(
+            &config.agent_socket,
+            &verified_request,
+            &target_key,
+            category,
+        );
         match outcome? {
             DecisionOutcome::Approve => Ok(1),
             DecisionOutcome::Expired => fallback_or_deny(&state, &config, &policy),
@@ -725,6 +741,52 @@ fn exchange_with_agent(
         message_kind::UNAVAILABLE => Ok(AgentReply::Unavailable),
         _ => Err(ExchangeError::Invalid),
     }
+}
+
+fn report_result(path: &Path, request: &VerifiedRequest, key: &SigningKey, outcome: u8) {
+    if send_result(path, request, key, outcome).is_err() {
+        hard_notice(
+            "Syn permission history could not be reported. Permission behavior is unchanged.\n",
+        );
+    }
+}
+
+fn send_result(
+    path: &Path,
+    request: &VerifiedRequest,
+    key: &SigningKey,
+    outcome: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let completed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let receipt = RequestResultV1::for_request(request, outcome, completed);
+    let signed = sign_result(&receipt, key)?;
+    let wire = WireMessageV1::new(message_kind::RESULT, signed)?.encode()?;
+    let mut frame = (wire.len() as u32).to_be_bytes().to_vec();
+    frame.extend_from_slice(&wire);
+    // A separate, bounded local connection also works after the original sender
+    // closes at timeout. It cannot extend the approval deadline or accept a decision.
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+    socket.connect_timeout(&SockAddr::unix(path)?, Duration::from_millis(100))?;
+    let fd: OwnedFd = socket.into();
+    let mut stream = UnixStream::from(fd);
+    let mut bytes = frame.as_slice();
+    while !bytes.is_empty() {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))?;
+        stream.set_write_timeout(Some(remaining))?;
+        match stream.write(bytes) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into()),
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn check_password_escape(
@@ -1650,6 +1712,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn target_reports_signed_outcomes_on_a_separate_local_connection() {
+        let target = syn_protocol::generate_signing_key();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/protocol-v2.json")).unwrap();
+        let public = syn_protocol::verifying_key_from_sec1(
+            &hex::decode(fixture["target_public_sec1_hex"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let original = verify_request(
+            &hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap(),
+            &public,
+        )
+        .unwrap();
+        let mut request = original.request;
+        request.target_key_id = syn_protocol::key_id(target.verifying_key()).to_vec().into();
+        request.release_id = syn_protocol::release_id().into();
+        request.release_commit = syn_protocol::release_commit().into();
+        let verified = verify_request(
+            &sign_request(&request, &target).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "syn-receipt-{}",
+            syn_protocol::key_id_hex(target.verifying_key())
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("agent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let key = *target.verifying_key();
+        let expected = verified.payload_hash;
+        let receiver = std::thread::spawn(move || {
+            for outcome in 1..=5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let message = WireMessageV1::decode(
+                    &read_frame(&mut stream, Instant::now() + Duration::from_secs(1)).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(message.kind, message_kind::RESULT);
+                let receipt = syn_protocol::verify_result(message.body.as_slice(), &key).unwrap();
+                assert_eq!(receipt.outcome, outcome);
+                assert_eq!(receipt.request_payload_hash.as_slice(), expected);
+                assert!(!String::from_utf8_lossy(
+                    &syn_protocol::encode_canonical(&receipt).unwrap()
+                )
+                .contains("/usr/bin/apt"));
+            }
+        });
+        for outcome in 1..=5 {
+            send_result(&path, &verified, &target, outcome).unwrap();
+        }
+        receiver.join().unwrap();
+        assert!(send_result(&directory.join("missing.sock"), &verified, &target, 1).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

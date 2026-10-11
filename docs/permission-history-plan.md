@@ -6,7 +6,7 @@ Each Mac-connected machine has selectable, persistent permission history, newest
 
 The Mac retains up to 1,000 completed records per device in a private, atomically replaced Application Support file. Only identifiers, timestamps, numeric user IDs, hashes and fixed categories are saved. Command text, arguments, environment values, credentials and signed permission payloads are excluded.
 
-Display-only result receipts bind to the target, request ID, request hash and exact release. Confirmed outcomes are Approved, Denied or Timed out; cancellation, failures and uncertain delivery are represented explicitly. A failed send is never a confirmed decision. Receipts and history cannot authorize anything, and existing one-use signatures, authentication, deadlines and password fallback remain in force.
+The privileged sender signs display-only result receipts, which bind to the target, request ID, request hash and exact release. Confirmed outcomes are Approved, Denied or Timed out; cancellation, failures and uncertain delivery are represented explicitly. A failed send is never a confirmed decision. Unsigned relay observations and cancellation notices stay unconfirmed. Receipts and history cannot authorize anything, and existing one-use signatures, authentication, deadlines and password fallback remain in force.
 
 ## Added update behavior
 

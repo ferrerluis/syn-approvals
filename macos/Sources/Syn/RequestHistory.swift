@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -32,6 +33,7 @@ struct RequestHistoryEntry: Codable, Identifiable, Equatable, Sendable {
     var completedAt: Date?
     var status: RequestHistoryStatus
     var confirmed: Bool
+    var targetSignatureVerified: Bool? = nil
     var id: String { "\(targetID):\(requestID)" }
 
     init(_ request: VerifiedApprovalRequest) {
@@ -61,15 +63,20 @@ struct RequestResultReceipt: Sendable {
     let invokingUID: UInt32
     let runAsUID: UInt32
 
-    init(_ data: Data, targetID: String) throws {
-        let map = try CBORCodec.decodeCanonical(data).integerKeyedMap()
+    init(_ data: Data, target: TargetRecord) throws {
+        guard let key = target.publicKey else { throw SynProtocolError.invalid("invalid receipt target key") }
+        let (payload, _) = try SynProtocol.verifyCOSE(data, key: key)
+        let targetID = target.targetID
+        let map = try CBORCodec.decodeCanonical(payload).integerKeyedMap()
         let release = ReleaseIdentity.current
         let commit = release.commit == "development" ? SynProtocol.developmentCommit : release.commit
-        guard map.count == 10, map[0]?.textValue == targetID,
+        guard map.count == 11, map[10]?.textValue == "org.syn-approvals.permission-result.v1",
+              map[0]?.textValue == targetID,
               let id = map[1]?.bytesValue, id.count == 16,
               let hash = map[2]?.bytesValue, hash.count == 32,
               map[3]?.textValue == release.releaseID, map[4]?.textValue == commit,
               let requested = Self.integer(map[5]), let completed = Self.integer(map[6]),
+              requested >= 0, completed >= requested,
               let outcome = map[7]?.unsignedValue,
               let invoking = map[8]?.unsignedValue, let invokingUID = UInt32(exactly: invoking),
               let runAs = map[9]?.unsignedValue, let runAsUID = UInt32(exactly: runAs) else {

@@ -31,8 +31,8 @@ The Pi emits `event=request_history` start/result records to the existing
 persistent system journal. Read them with `journalctl -u syn-agent --no-pager`
 and filter for `request_history`; retention follows the host's journal policy.
 Request IDs correlate the Mac and Pi records. Approved and Denied mean the
-relay returned a validated permission decision; they do not report command
-completion or its exit code. The Mac displays delivery attempts separately
+privileged sender independently accepted a validated permission decision; they do not report command
+completion or its exit code. Relay and target observations are labeled separately. The Mac displays delivery attempts separately
 until a receipt arrives. A locally observed timeout is labeled accordingly.
 
 History cannot authorize requests. A Mac storage error is shown in the history

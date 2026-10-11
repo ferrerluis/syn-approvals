@@ -101,26 +101,34 @@ Every WebSocket binary frame contains a canonical `WireMessageV1` map whose wire
 
 Kinds are hello, request, cancel, decision, result, ping, pong, error, and unavailable. Frames larger than 64 KiB are rejected.
 
-The root plug-in uses the same envelope over a Unix stream prefixed by a four-byte network-order length. Only request, cancel, decision, and unavailable/error messages are valid locally. The unprivileged relay can verify and relay messages but has no command-execution API and never holds the target authorization private key.
+The root plug-in uses the same envelope over a Unix stream prefixed by a four-byte network-order length. Requests, decisions, unavailable/errors, signed display-only results, and update health traffic are valid locally. The unprivileged relay can verify and relay messages but has no command-execution API and never holds the target authorization private key.
 
 ## Observational permission receipts
 
-The existing `result` kind carries a canonical ten-key CBOR map: target ID (0),
-16-byte request ID (1), 32-byte request payload hash (2), release ID (3), release
-commit (4), signed request timestamp in Unix milliseconds (5), completion
-Unix milliseconds (6), result category (7), invoking UID (8), and run-as UID (9).
-Categories are 1 approved, 2 denied, 3 timed out, 4 canceled, 5 failed, and
-6 unconfirmed. These are relay observations over the existing pinned mTLS
-connection, not target-signed authorizations or command execution receipts.
+The existing `result` kind carries a target-signed COSE Sign1 envelope with a
+canonical eleven-key CBOR map: target ID (0), 16-byte request ID (1), 32-byte
+request payload hash (2), release ID (3), release commit (4), request time in
+Unix milliseconds (5), completion time (6), outcome (7), invoking UID (8),
+run-as UID (9), and domain `org.syn-approvals.permission-result.v1` (10).
+Outcomes are 1 approved, 2 denied, 3 timed out, 4 canceled, 5 failed, and
+6 unconfirmed. The privileged sender signs its own observation after independently
+validating the decision, expiry, cancellation, or failure. This is a permission
+outcome, not a command execution receipt or an authorization.
 
-Approval/denial is recorded only after returning the validated decision to the
-waiting local sender. A failed write is unconfirmed. On sender disconnect, an
-elapsed original request expiry is reported as timed out; an earlier disconnect
-is canceled. This display bookkeeping never changes the monotonic authorization
-deadline. A receipt cannot create a pending request, sign a decision, enter PAM,
-or execute a command. The Mac accepts it only for a matching observed request
-and never imports offline history. Repeated identical results are harmless;
-conflicting terminal results are rejected.
+The sender reports through a separate local connection with a 100-ms delivery
+budget, including after its original connection closes at timeout. Reporting
+failures are visible and never change approval, denial, deadlines, or PAM.
+The relay verifies the target signature and exact release before relaying the
+receipt; it never has the signing key. Its journal distinguishes `observation=relay`
+from `observation=target`. Relay-only observations cannot confirm Mac history.
+
+The Mac verifies the paired target signature and all request bindings before
+marking an entry confirmed. A cancellation notice only removes pending UI and
+leaves the outcome Unconfirmed until a signed result arrives. Neither receipts
+nor history can create requests, sign decisions, enter PAM, or execute commands.
+Reconnect does not fetch missed receipts. Identical results are harmless;
+conflicting confirmed results are rejected. Old unsigned relay confirmations
+are downgraded to Unconfirmed when loading history.
 
 ## State machine
 
@@ -158,4 +166,4 @@ Each root-owned additional approver record binds one client TLS leaf certificate
 
 The first valid decision resolves one invocation. The relay broadcasts its existing `CANCEL` message to remove the request from other apps. Bounded terminal request hashes distinguish a legitimate competing response from malformed input; they never authorize another invocation.
 
-Envelope kind 10 is reserved and unsupported. Syn has no push registration message. Codex attention prompts are outside this protocol and cannot authorize an invocation.
+Envelope kinds 10 and 11 are update health checks and responses. Syn has no push registration message. Codex attention prompts are outside this protocol and cannot authorize an invocation.

@@ -108,9 +108,15 @@ final class SynModel: ObservableObject {
         if let historyStore = self.historyStore {
             do {
                 history = try historyStore.load()
-                for index in history.indices where history[index].completedAt == nil {
-                    history[index].status = .unconfirmed
-                    history[index].completedAt = .now
+                for index in history.indices {
+                    if history[index].confirmed && history[index].targetSignatureVerified != true {
+                        history[index].confirmed = false
+                        history[index].status = .unconfirmed
+                    }
+                    if history[index].completedAt == nil {
+                        history[index].status = .unconfirmed
+                        history[index].completedAt = .now
+                    }
                 }
                 try historyStore.save(history)
             } catch { historyLoadFailed = true; historyError = "Request history could not be loaded or saved." }
@@ -694,7 +700,7 @@ final class SynModel: ObservableObject {
                     if let request = pending.first(where: {
                         $0.targetID == target.targetID && $0.requestID == requestID
                     }) {
-                        setHistory(request.id, status: request.isExpired ? .timedOut : .canceled)
+                        setHistory(request.id, status: .unconfirmed)
                         finish(request)
                     }
                 case .ping:
@@ -712,7 +718,7 @@ final class SynModel: ObservableObject {
                         }
                     }
                 case .result:
-                    try receiveHistoryReceipt(message.body, targetID: target.targetID)
+                    try receiveHistoryReceipt(message.body, from: target)
                 case .pong: break
                 default: throw SynProtocolError.invalid("unexpected target message")
                 }
@@ -902,8 +908,9 @@ final class SynModel: ObservableObject {
         saveHistory()
     }
 
-    func receiveHistoryReceipt(_ body: Data, targetID: String) throws {
-        let receipt = try RequestResultReceipt(body, targetID: targetID)
+    func receiveHistoryReceipt(_ body: Data, from target: TargetRecord) throws {
+        let targetID = target.targetID
+        let receipt = try RequestResultReceipt(body, target: target)
         let id = "\(targetID):\(receipt.requestID)"
         guard let index = history.firstIndex(where: { $0.id == id }) else { return }
         guard receipt.matches(history[index]) else { throw SynProtocolError.invalid("permission receipt does not match request") }
@@ -913,7 +920,8 @@ final class SynModel: ObservableObject {
         }
         history[index].status = receipt.status
         history[index].completedAt = receipt.completedAt
-        history[index].confirmed = true
+        history[index].confirmed = receipt.status != .unconfirmed
+        history[index].targetSignatureVerified = true
         if let request = pending.first(where: { $0.id == id }) { finish(request) }
         saveHistory()
     }

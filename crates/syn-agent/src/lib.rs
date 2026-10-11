@@ -18,9 +18,10 @@ use sha2::{Digest, Sha256};
 use syn_config::{approvers::ApproverRegistry, AgentConfig};
 use syn_protocol::message_kind;
 use syn_protocol::{
-    encode_canonical, verify_decision, verify_request, verify_update_health, AuthenticationClass,
-    CancelV1, DecisionAction, ErrorV1, HelloV1, RequestResultV1, UpdateHealthV1, VerifiedDecision,
-    VerifiedRequest, WireMessageV1, MAX_WIRE_BYTES, PROTOCOL_VERSION,
+    encode_canonical, verify_decision, verify_request, verify_result, verify_update_health,
+    AuthenticationClass, CancelV1, DecisionAction, ErrorV1, HelloV1, RequestResultV1,
+    UpdateHealthV1, VerifiedDecision, VerifiedRequest, WireMessageV1, MAX_WIRE_BYTES,
+    PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};
@@ -291,6 +292,16 @@ async fn handle_local(
             .await
         }
     };
+    if message.kind == message_kind::RESULT {
+        let receipt = verify_result(message.body.as_slice(), &state.target_key)?;
+        if receipt.target_id != state.target_id {
+            bail!("permission receipt does not match target");
+        }
+        log_result(&receipt, "target");
+        // Display only: this path cannot resolve pending authorization requests.
+        let _ = state.event_tx.send(message);
+        return Ok(());
+    }
     if message.kind == message_kind::HEALTH_CHECK {
         return handle_health(&mut stream, state, message.body.to_vec()).await;
     }
@@ -385,19 +396,19 @@ async fn handle_local(
             // route_decision already verified signature, binding, class and timeliness.
             let response = WireMessageV1::new(message_kind::DECISION, signed_decision)?.encode()?;
             if let Err(error) = write_frame(&mut stream, &response).await {
-                record_result(&state, receipt, 6);
+                record_result(receipt, 6);
                 return Err(error);
             }
-            record_result(&state, receipt, outcome);
+            record_result(receipt, outcome);
         }
         LocalOutcome::Expired => {
             state.pending.lock().await.remove(&request_id);
-            record_result(&state, receipt, 3);
+            record_result(receipt, 3);
             broadcast_cancel(&state, &request_id_bytes).await?;
             write_unavailable(&mut stream, "expired", "no valid decision before deadline").await?;
         }
         LocalOutcome::IntegrityFailure => {
-            record_result(&state, receipt, 5);
+            record_result(receipt, 5);
             let error = ErrorV1 {
                 code: "integrity_failure".into(),
                 message: "authenticated approver sent an invalid decision".into(),
@@ -415,7 +426,7 @@ async fn handle_local(
             } else {
                 4
             };
-            record_result(&state, receipt, outcome);
+            record_result(receipt, outcome);
             broadcast_cancel(&state, &request_id_bytes).await?;
         }
     }
@@ -517,10 +528,16 @@ fn history_deadline(request: &VerifiedRequest, now_ms: i64, now: Instant) -> Ins
     now + Duration::from_millis(u64::from(request.request.ttl_ms).saturating_sub(age))
 }
 
-fn record_result(state: &AgentState, mut receipt: RequestResultV1, outcome: u8) {
+fn record_result(mut receipt: RequestResultV1, outcome: u8) {
     receipt.outcome = outcome;
     receipt.completed_at_unix_ms = unix_ms();
-    let category = match outcome {
+    log_result(&receipt, "relay");
+    // Only the privileged sender can confirm a result. Relay observations stay
+    // in its journal and are never broadcast as authoritative history.
+}
+
+fn log_result(receipt: &RequestResultV1, observation: &str) {
+    let category = match receipt.outcome {
         1 => "approved",
         2 => "denied",
         3 => "timed_out",
@@ -531,18 +548,7 @@ fn record_result(state: &AgentState, mut receipt: RequestResultV1, outcome: u8) 
     info!(event = "request_history", request_id = %hex::encode(receipt.request_id.as_slice()),
         target_id = %receipt.target_id, requested_at_unix_ms = receipt.requested_at_unix_ms,
         completed_at_unix_ms = receipt.completed_at_unix_ms, invoking_uid = receipt.invoking_uid,
-        run_as_uid = receipt.run_as_uid, outcome = category, "Syn permission result");
-    // History failures have no influence on permission decisions.
-    match encode_canonical(&receipt).and_then(|body| WireMessageV1::new(message_kind::RESULT, body))
-    {
-        Ok(event) => {
-            let _ = state.event_tx.send(event);
-        }
-        Err(_) => warn!(
-            event = "history_failure",
-            "Permission receipt could not be encoded"
-        ),
-    }
+        run_as_uid = receipt.run_as_uid, outcome = category, observation, "Syn permission result");
 }
 
 async fn broadcast_cancel(state: &AgentState, request_id: &[u8]) -> Result<()> {
@@ -1166,15 +1172,104 @@ mod tests {
             // Other paired reviewers close their pending UI before the sender
             // receives a display-only result for the completed invocation.
             assert_eq!(event_rx.recv().await.unwrap().kind, message_kind::CANCEL);
+            // A successful relay write alone cannot confirm any history.
+            assert!(event_rx.try_recv().is_err());
+            let receipt = RequestResultV1::for_request(&verified, expected, unix_ms());
+            let signed_receipt = syn_protocol::sign_result(&receipt, &target).unwrap();
+            let (server, mut reporter) = UnixStream::pair().unwrap();
+            let uid = server.peer_cred().unwrap().uid();
+            let result = WireMessageV1::new(message_kind::RESULT, signed_receipt.clone())
+                .unwrap()
+                .encode()
+                .unwrap();
+            write_frame(&mut reporter, &result).await.unwrap();
+            handle_local(server, state.clone(), uid).await.unwrap();
             let event = event_rx.recv().await.unwrap();
             assert_eq!(event.kind, message_kind::RESULT);
-            let receipt: RequestResultV1 = syn_protocol::decode_canonical(&event.body).unwrap();
+            assert_eq!(event.body.as_slice(), signed_receipt);
+            let receipt = syn_protocol::verify_result(&event.body, target.verifying_key()).unwrap();
             receipt.validate().unwrap();
             assert_eq!(receipt.outcome, expected);
             assert_eq!(
                 receipt.request_payload_hash.as_slice(),
                 verified.payload_hash
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_history_cannot_resolve_authorization_and_rejects_forgery() {
+        let target = generate_signing_key();
+        let other = generate_signing_key();
+        let request = ApprovalRequestV1::new("pi-dev".into(), target.verifying_key(), intent());
+        let verified = verify_request(
+            &sign_request(&request, &target).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let id = hex::encode(verified.request.request_id.as_slice());
+        let receipt = RequestResultV1::for_request(&verified, 1, unix_ms());
+        let (event_tx, mut events) = broadcast::channel(4);
+        let (tx, mut rx) = oneshot::channel();
+        let state = Arc::new(AgentState {
+            target_id: "pi-dev".into(),
+            target_key: *target.verifying_key(),
+            approval_key: *other.verifying_key(),
+            denial_key: *other.verifying_key(),
+            approvers: vec![],
+            max_pending: 4,
+            pending: Mutex::new(HashMap::new()),
+            resolved: Mutex::new(HashMap::new()),
+            health: Mutex::new(HashMap::new()),
+            event_tx,
+        });
+        state.pending.lock().await.insert(
+            id.clone(),
+            PendingRequest {
+                verified,
+                signed_request: vec![],
+                deadline: Instant::now() + Duration::from_secs(90),
+                response_tx: tx,
+            },
+        );
+        for body in [
+            encode_canonical(&receipt).unwrap(),
+            syn_protocol::sign_result(&receipt, &other).unwrap(),
+        ] {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let uid = server.peer_cred().unwrap().uid();
+            write_frame(
+                &mut client,
+                &WireMessageV1::new(message_kind::RESULT, body)
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(handle_local(server, state.clone(), uid).await.is_err());
+            assert!(events.try_recv().is_err());
+        }
+        let signed = syn_protocol::sign_result(&receipt, &target).unwrap();
+        for _ in 0..2 {
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let uid = server.peer_cred().unwrap().uid();
+            write_frame(
+                &mut client,
+                &WireMessageV1::new(message_kind::RESULT, signed.clone())
+                    .unwrap()
+                    .encode()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            handle_local(server, state.clone(), uid).await.unwrap();
+            assert_eq!(events.recv().await.unwrap().body.as_slice(), signed);
+            assert!(state.pending.lock().await.contains_key(&id));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
         }
     }
 
@@ -1232,16 +1327,12 @@ mod tests {
         drop(client);
         task.await.unwrap().unwrap();
 
-        let result_event = event_rx.recv().await.unwrap();
-        assert_eq!(result_event.kind, message_kind::RESULT);
-        let result: RequestResultV1 = syn_protocol::decode_canonical(&result_event.body).unwrap();
-        assert_eq!(result.outcome, 4);
-        result.validate().unwrap();
         let cancel_event = event_rx.recv().await.unwrap();
         assert_eq!(cancel_event.kind, message_kind::CANCEL);
         let cancel: CancelV1 = syn_protocol::decode_canonical(&cancel_event.body).unwrap();
         assert_eq!(cancel.request_id.as_slice(), request_id);
         assert!(state.pending.lock().await.is_empty());
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]

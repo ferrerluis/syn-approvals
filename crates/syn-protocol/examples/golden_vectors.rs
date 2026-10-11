@@ -105,10 +105,10 @@ fn main() {
         "signed_health_check_hex": hex::encode(syn_protocol::sign_cose(&health_payload, &target).unwrap()),
         "signed_health_response_hex": hex::encode(syn_protocol::sign_cose(&health_payload, &denial).unwrap()),
         "schema_version": 1,
-        "approved_result_hex": hex::encode(syn_protocol::encode_canonical(
-            &RequestResultV1::for_request(&verified, 1, 1_700_000_001_000)).unwrap()),
-        "timed_out_result_hex": hex::encode(syn_protocol::encode_canonical(
-            &RequestResultV1::for_request(&verified, 3, 1_700_000_090_000)).unwrap()),
+        "approved_result_hex": hex::encode(syn_protocol::sign_result(
+            &RequestResultV1::for_request(&verified, 1, 1_700_000_001_000), &target).unwrap()),
+        "timed_out_result_hex": hex::encode(syn_protocol::sign_result(
+            &RequestResultV1::for_request(&verified, 3, 1_700_000_090_000), &target).unwrap()),
         "target_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(target.verifying_key())),
         "approval_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(approval.verifying_key())),
         "denial_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(denial.verifying_key())),

@@ -504,7 +504,7 @@ pub struct HelloV1 {
     pub release_commit: String,
 }
 
-/// Observational relay receipt. Never accepted as an authorization decision.
+/// Target-signed observation. Never accepted as an authorization decision.
 #[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
 #[cbor(map)]
 pub struct RequestResultV1 {
@@ -529,6 +529,8 @@ pub struct RequestResultV1 {
     pub invoking_uid: u32,
     #[n(9)]
     pub run_as_uid: u32,
+    #[n(10)]
+    pub domain: String,
 }
 
 impl RequestResultV1 {
@@ -544,6 +546,7 @@ impl RequestResultV1 {
             outcome,
             invoking_uid: request.request.sudo.invoking_uid,
             run_as_uid: request.request.sudo.run_as_uid,
+            domain: "org.syn-approvals.permission-result.v1".into(),
         }
     }
 
@@ -552,6 +555,9 @@ impl RequestResultV1 {
             || self.target_id.len() > 128
             || self.request_id.len() != 16
             || self.request_payload_hash.len() != 32
+            || self.domain != "org.syn-approvals.permission-result.v1"
+            || self.requested_at_unix_ms < 0
+            || self.completed_at_unix_ms < self.requested_at_unix_ms
             || !(1..=6).contains(&self.outcome)
             || self.release_id != release_id()
             || self.release_commit != release_commit()
@@ -560,6 +566,18 @@ impl RequestResultV1 {
         }
         Ok(())
     }
+}
+
+pub fn sign_result(receipt: &RequestResultV1, key: &SigningKey) -> Result<Vec<u8>, ProtocolError> {
+    receipt.validate()?;
+    sign_cose(&encode_canonical(receipt)?, key)
+}
+
+pub fn verify_result(signed: &[u8], key: &VerifyingKey) -> Result<RequestResultV1, ProtocolError> {
+    let (payload, _) = verify_cose(signed, key)?;
+    let receipt: RequestResultV1 = decode_canonical(&payload)?;
+    receipt.validate()?;
+    Ok(receipt)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, Decode)]
@@ -1185,5 +1203,31 @@ mod tests {
         let message = WireMessageV1::new(message_kind::PING, b"nonce".to_vec()).unwrap();
         let encoded = message.encode().unwrap();
         assert_eq!(WireMessageV1::decode(&encoded).unwrap(), message);
+    }
+    #[test]
+    fn permission_receipts_require_target_signatures_and_cannot_authorize() {
+        let target = generate_signing_key();
+        let request =
+            ApprovalRequestV1::new("pi-dev".into(), target.verifying_key(), sample_intent());
+        let verified = verify_request(
+            &sign_request(&request, &target).unwrap(),
+            target.verifying_key(),
+        )
+        .unwrap();
+        let receipt = RequestResultV1::for_request(&verified, 1, request.issued_at_unix_ms + 1);
+        let signed = sign_result(&receipt, &target).unwrap();
+        assert_eq!(
+            verify_result(&signed, target.verifying_key()).unwrap(),
+            receipt
+        );
+        assert!(
+            verify_result(&encode_canonical(&receipt).unwrap(), target.verifying_key()).is_err()
+        );
+        assert!(verify_result(&signed, generate_signing_key().verifying_key()).is_err());
+        assert!(verify_request(&signed, target.verifying_key()).is_err());
+        assert!(verify_decision(&signed, target.verifying_key()).is_err());
+        let mut forged = signed;
+        *forged.last_mut().unwrap() ^= 1;
+        assert!(verify_result(&forged, target.verifying_key()).is_err());
     }
 }
