@@ -29,7 +29,7 @@ Syn is ready for personal use only when all of these are true:
 - Normal `sudo` from SSH and Codex sends a clear approval request to the Mac.
 - One Mac approval runs one unchanged command. Repeating the command requires a new approval.
 - Rejecting, canceling, altering, or reusing a request never runs the command and never opens the Ubuntu password fallback.
-- If the Mac is simply unavailable for 90 seconds, an interactive terminal offers the normal Ubuntu password. A non-interactive command fails without prompting.
+- If the Mac is simply unavailable for 300 seconds, an interactive terminal offers the normal Ubuntu password. A non-interactive command fails without prompting.
 - Directly invoking `sudo-rs` cannot bypass Syn and become root.
 - If Syn's sudo plug-in is missing, unreadable, or damaged, sudo refuses the managed command instead of silently running it.
 - A timer running locally on the Pi can remove Syn's passwordless sudo rule and restore ordinary password sudo even when the Mac app and SSH connection are unavailable.
@@ -42,7 +42,7 @@ A successful build proves only that the source is valid enough for the compiler.
 
 Codex can run every test except the final Touch ID check:
 
-- Use the supplied Ubuntu password for initial setup and the 90-second fallback test.
+- Use the supplied Ubuntu password for initial setup and the 300-second fallback test.
 - Use the supplied Mac login password for Mac approval tests before the final Touch ID check.
 - Use Computer control to press Deny and cancel authentication in negative tests.
 - Ask Luis to perform one final Touch ID approval only after every password-based and failure-path test passes.
@@ -109,9 +109,9 @@ The initial installer rolled back its own immediate errors but lacked reboot-per
 
 Unit-test command construction and state transitions locally. Prove the timer first with a harmless marker action before trusting it with sudo recovery.
 
-### C. Set the approval wait to 90 seconds
+### C. Set the approval wait to 300 seconds
 
-The private alpha uses one exact 90-second approval TTL everywhere. This supersedes the earlier 30-second choice at the user's request on 2026-09-04; earlier validation reports remain historical evidence of that earlier build, not proof of the new timeout.
+The private alpha uses one exact 300-second approval TTL everywhere. This supersedes the earlier 90-second choice at the user's request on 2026-10-21; earlier validation reports remain historical evidence of that earlier build, not proof of the new timeout.
 
 - Rust configuration defaults and validation.
 - Request TTL, monotonic deadline, socket wait, and late-decision rejection.
@@ -119,7 +119,7 @@ The private alpha uses one exact 90-second approval TTL everywhere. This superse
 - Mac request countdown and expiry display.
 - Golden vectors if the encoded TTL changes.
 
-Add boundary tests for a decision immediately before the 90-second deadline and a decision immediately after it. A decision arriving late must never race with or override the Ubuntu password fallback.
+Add boundary tests for a decision immediately before the 300-second deadline and a decision immediately after it. A decision arriving late must never race with or override the Ubuntu password fallback.
 
 ## Phase 1 — establish a clean repository baseline
 
@@ -278,7 +278,7 @@ Use commands with harmless effects until the security states pass:
 | Reuse | repeat the same command | a new request and new authentication |
 | Explicit denial | deny on Mac | deny immediately; no Ubuntu password |
 | Mac cancellation | cancel system authentication | no execution; terminal explains that Mac authentication was canceled and that rerunning sudo creates a new request |
-| Interactive absence | quit Syn.app, run with TTY | after 90 seconds, normal no-echo Ubuntu password prompt |
+| Interactive absence | quit Syn.app, run with TTY | after 300 seconds, normal no-echo Ubuntu password prompt |
 | Non-interactive absence | `sudo -n /usr/bin/true` | fail after expiry; no prompt |
 | Terminal cancellation | Ctrl-C while waiting | request cancellation; late approval rejected |
 | Local policy | `sudo -s`, `sudo -i`, configured shell/interpreter | hard deny before notification |

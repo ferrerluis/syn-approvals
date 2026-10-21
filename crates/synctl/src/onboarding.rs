@@ -716,7 +716,7 @@ pub fn configure(operation_id: &str, apply: bool) -> Result<PairingReport> {
     journal.paired_update = Path::new("/var/lib/syn/pairing-complete.json").exists();
     if journal.paired_update {
         let previous = syn_config::PluginConfig::load(DEFAULT_PLUGIN_CONFIG)?;
-        previous.validate()?;
+        validate_previous_plugin_config(&previous)?;
         crate::installer::validate_pairing_evidence(&previous)?;
         if previous.target_id != request.target_id || previous.managed_user != request.managed_user
         {
@@ -1697,6 +1697,18 @@ fn configure_identities(request: &OnboardingRequest) -> Result<()> {
     Ok(())
 }
 
+// Only the retained configuration read during an unarmed paired update may
+// carry the prior release's timeout. Do not relax live configuration or signed
+// request validation, and validate every other retained field unchanged.
+fn validate_previous_plugin_config(previous: &PluginConfig) -> Result<()> {
+    let mut candidate = previous.clone();
+    if candidate.timeout_seconds == 90 {
+        candidate.timeout_seconds = syn_config::APPROVAL_TIMEOUT_SECONDS;
+    }
+    candidate.validate()?;
+    Ok(())
+}
+
 fn configure_target(request: &OnboardingRequest, managed_uid: u32) -> Result<()> {
     let listen = std::net::SocketAddr::new(request.listen_ip, syn_config::DEFAULT_LISTEN_PORT);
     let prior_agent = match AgentConfig::load(DEFAULT_AGENT_CONFIG) {
@@ -2548,6 +2560,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn paired_update_accepts_only_current_or_prior_timeout_and_keeps_other_checks() {
+        let mut previous: PluginConfig =
+            toml::from_str(include_str!("../../../packaging/examples/plugin.toml")).unwrap();
+        for timeout in [90, 300] {
+            previous.timeout_seconds = timeout;
+            validate_previous_plugin_config(&previous).unwrap();
+            assert_eq!(previous.timeout_seconds, timeout);
+        }
+        previous.timeout_seconds = 90;
+        assert!(previous.validate().is_err());
+        for timeout in [0, 30, 120, 299, 301] {
+            previous.timeout_seconds = timeout;
+            assert!(validate_previous_plugin_config(&previous).is_err());
+        }
+        previous.timeout_seconds = 90;
+        previous.pam_service = "other".into();
+        assert!(validate_previous_plugin_config(&previous).is_err());
+        previous.pam_service = "syn-sudo-fallback".into();
+        previous.target_private_key = "relative-key".into();
+        assert!(validate_previous_plugin_config(&previous).is_err());
     }
 
     fn fixture(source: &[u8]) -> (OnboardingRequest, Vec<u8>) {

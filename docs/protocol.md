@@ -2,7 +2,7 @@
 
 Status: implemented candidate wire contract with shared Rust/Swift golden vectors. Numeric map keys are part of the protocol; live Mac-led E2E acceptance is still pending.
 
-Version 2 requires a 90-second TTL and the exact compiled release ID and Git commit in the hello, signed request, and signed decision. Version 1 and mixed-release messages fail closed even when their signatures are otherwise valid.
+Version 2 requires a 300-second TTL and the exact compiled release ID and Git commit in the hello, signed request, and signed decision. Version 1 and mixed-release messages fail closed even when their signatures are otherwise valid.
 
 ## Encoding
 
@@ -45,7 +45,7 @@ The Rust type remains named `ApprovalRequestV1`, but its wire `protocol_version`
 | 5 | adapter kind | text, initially `org.syn-approvals.sudo` |
 | 6 | adapter schema | unsigned, initially 1 |
 | 7 | issued at | signed Unix milliseconds, display only |
-| 8 | TTL | exactly 90000 milliseconds |
+| 8 | TTL | exactly 300000 milliseconds |
 | 9 | sudo intent | `SudoIntentV1` map |
 | 10 | release ID | exact compiled release ID |
 | 11 | release commit | exact compiled Git commit |

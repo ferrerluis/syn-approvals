@@ -78,6 +78,13 @@ fn main() {
         &target,
     )
     .unwrap();
+    let mut legacy_90_request = request.clone();
+    legacy_90_request.ttl_ms = 90_000;
+    let legacy_90_request = syn_protocol::sign_cose(
+        &syn_protocol::encode_canonical(&legacy_90_request).unwrap(),
+        &target,
+    )
+    .unwrap();
     let mut approval_decision = DecisionV1::for_request(
         &verified,
         DecisionAction::ApproveOnce,
@@ -108,7 +115,7 @@ fn main() {
         "approved_result_hex": hex::encode(syn_protocol::sign_result(
             &RequestResultV1::for_request(&verified, 1, 1_700_000_001_000), &target).unwrap()),
         "timed_out_result_hex": hex::encode(syn_protocol::sign_result(
-            &RequestResultV1::for_request(&verified, 3, 1_700_000_090_000), &target).unwrap()),
+            &RequestResultV1::for_request(&verified, 3, 1_700_000_300_000), &target).unwrap()),
         "target_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(target.verifying_key())),
         "approval_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(approval.verifying_key())),
         "denial_public_sec1_hex": hex::encode(syn_protocol::verifying_key_sec1(denial.verifying_key())),
@@ -118,6 +125,7 @@ fn main() {
         "signed_no_tty_request_hex": hex::encode(signed_no_tty),
         "signed_no_tty_noninteractive_request_hex": hex::encode(signed_no_tty_noninteractive),
         "legacy_30_second_request_hex": hex::encode(legacy_request),
+        "legacy_90_second_request_hex": hex::encode(legacy_90_request),
         "request_payload_hash_hex": hex::encode(verified.payload_hash),
         "signed_approval_hex": hex::encode(sign_decision(&approval_decision, &approval).unwrap()),
         "signed_denial_hex": hex::encode(sign_decision(&denial_decision, &denial).unwrap()),

@@ -59,7 +59,7 @@ No cross-version approval compatibility matrix is required. The small SSH mainte
 
 Enter cancels the pending Mac request and starts normal local password verification immediately.
 
-Preserve the original command and complete it only once. Test Enter racing with approval, denial, timeout and cancellation. A completed denial or integrity/policy failure remains final for that invocation; Enter cannot override it. Non-interactive invocations do not prompt. Keep the 90-second wait when Enter is not used, and keep passwords out of Syn logs, network approval messages and test output. Update the existing fallback policy and documentation to make this interactive path standard.
+Preserve the original command and complete it only once. Test Enter racing with approval, denial, timeout and cancellation. A completed denial or integrity/policy failure remains final for that invocation; Enter cannot override it. Non-interactive invocations do not prompt. Keep the 300-second wait when Enter is not used, and keep passwords out of Syn logs, network approval messages and test output. Update the existing fallback policy and documentation to make this interactive path standard.
 
 A broken Syn plug-in could fail before displaying that prompt. Updates must therefore also protect password access independently:
 
@@ -69,7 +69,7 @@ A broken Syn plug-in could fail before displaying that prompt. Updates must ther
 4. Validate the candidate, re-enable Syn, then perform a real approval/health check.
 5. Cancel recovery only after success. Otherwise restore password-only sudo and offer retry.
 
-Users do not manage recovery timers. Keep the existing 15-minute recovery deadline separate from the 90-second command wait. Never remove another administrator's restrictions, weaken alternate-sudo checks or leave an ungated passwordless rule. Remove `NOPASSWD` first during recovery and add it last during activation. A hung update must not block recovery from running.
+Users do not manage recovery timers. Keep the existing 15-minute recovery deadline separate from the 300-second command wait. Never remove another administrator's restrictions, weaken alternate-sudo checks or leave an ungated passwordless rule. Remove `NOPASSWD` first during recovery and add it last during activation. A hung update must not block recovery from running.
 
 ## 5. Downloads without a distribution platform
 

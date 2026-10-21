@@ -96,7 +96,7 @@ struct TargetRecord: Codable, Identifiable, Hashable, Sendable {
 enum SynProtocol {
     static let version: UInt64 = 2
     static let sudoAdapter = "org.syn-approvals.sudo"
-    static let approvalTTLMilliseconds: UInt64 = 90_000
+    static let approvalTTLMilliseconds: UInt64 = 300_000
     static let developmentCommit = String(repeating: "0", count: 40)
 
     static func helloBody(targetID: String) throws -> Data {

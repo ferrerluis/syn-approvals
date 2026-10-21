@@ -10,7 +10,7 @@ This is a historical checkpoint from September 9, 2026. At that date, Syn was an
 - Onboarding is split into resumable `prepare`, `cleanup`, `build`, `configure`, `activate` and `complete` phases. `recover` removes `NOPASSWD` before restoring or removing other state.
 - Successful setup leaves the Mac app talking directly to the remote machine over mutually authenticated TLS. Everyday approvals do not use an SSH tunnel, cloud relay or VPN-provider dependency.
 - The wire protocol is version 2. Hello, request and decision messages bind the target, release ID and exact release commit; mixed releases fail closed before an approval is accepted.
-- Each approval is limited to one signed invocation and expires after 90 seconds. An interactive user may press Enter to cancel the pending remote approval and use ordinary password sudo; denial and integrity failures do not fall back.
+- Each approval is limited to one signed invocation and expires after 300 seconds. An interactive user may press Enter to cancel the pending remote approval and use ordinary password sudo; denial and integrity failures do not fall back.
 - Candidate update, interrupted-operation recovery, uninstall and login-startup paths exist. Completion requires a fresh approval and an exact live release/coupling check before recovery protection is canceled.
 
 ## Evidence available at this checkpoint

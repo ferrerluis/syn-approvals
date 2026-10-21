@@ -40,7 +40,7 @@ npx --no-install agent-device --help
 
 ## Alerts and platform scope
 
-See [`docs/codex-approvals.md`](../docs/codex-approvals.md). Codex alerts require a connected host and phone permissions. They cover Codex-initiated work only; a reply cannot authorize anything, and expiry remains 90 seconds. Real phone alert delivery and physical Secure Enclave proof are outside this milestone.
+See [`docs/codex-approvals.md`](../docs/codex-approvals.md). Codex alerts require a connected host and phone permissions. They cover Codex-initiated work only; a reply cannot authorize anything, and expiry is 300 seconds. Real phone alert delivery and physical Secure Enclave proof are outside this milestone.
 
 Android can reuse the typed native interface and UI, but currently has no native approval backend. Implementing its platform key protection and trusted transport is a separate milestone.
 

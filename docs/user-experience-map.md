@@ -25,7 +25,7 @@ flowchart LR
 
 | Who is doing the work? | Desired experience | Current alpha |
 | --- | --- | --- |
-| You, in an SSH or remote-desktop terminal | Ask for the remote account's password there immediately. | The configured managed account still starts with Syn, then offers eligible password fallback after 90 seconds. |
+| You, in an SSH or remote-desktop terminal | Ask for the remote account's password there immediately. | The configured managed account still starts with Syn, then offers eligible password fallback after 300 seconds. |
 | An agent using the remote machine | Ask you on the Mac before each administrator action. | Syn requests a Mac decision for each eligible invocation by the managed account. |
 
 **Planned password escape, not implemented:** Syn will not distinguish humans from agents. While an interactive request is pending, pressing Enter cancels that request and starts remote-password verification immediately. Enter is never approval or proof of human presence, and cannot override a completed hard denial. See TODO 3, now included in the delivery plan.
@@ -70,7 +70,7 @@ One Mac can approve for several remote machines. Each remote machine currently u
 
 ### Why installation has a rollback deadline
 
-Syn changes how administrator access works. If setup fails, a connection breaks, or the new approval path stops working, an automatic rollback restores ordinary password sudo so you do not remain locked out of administrator access. It is a temporary installation/reconfiguration safeguard—not the 90-second command timer or a timer needed for normal daily use.
+Syn changes how administrator access works. If setup fails, a connection breaks, or the new approval path stops working, an automatic rollback restores ordinary password sudo so you do not remain locked out of administrator access. It is a temporary installation/reconfiguration safeguard—not the 300-second command timer or a timer needed for normal daily use.
 
 The current alpha exposes arming and canceling this safeguard as manual setup steps. A polished installer should manage it, show a plain-language recovery countdown, and only finish after a real approval and health check succeed; the user should not need to manage timers. Independent recovery access still matters if the installer itself fails. See TODO 1.
 
@@ -81,14 +81,14 @@ Example: Codex needs to install GitHub CLI on the remote machine. It requests th
 ```mermaid
 flowchart TD
     task["Remote machine · Task needs administrator permission"]
-    wait["Remote machine · Waiting for Syn approval<br/>90-second approval window"]
+    wait["Remote machine · Waiting for Syn approval<br/>300-second approval window"]
     notify["Mac · Syn approval requested<br/>Notification identifies the remote machine and user"]
     review["Review<br/>Check the account, action, arguments and time left"]
     choice{"Your choice"}
     auth["Approve<br/>Touch ID or Mac login password"]
     run["Remote machine · This task continues once<br/>The next request needs a new approval"]
     deny["Remote machine · Request denied<br/>No password fallback for this invocation"]
-    timeout["90 seconds pass without a decision"]
+    timeout["300 seconds pass without a decision"]
     fallback{"Interactive remote machine terminal<br/>and password fallback enabled?"}
     password["Remote machine · Enter Ubuntu password"]
     passwordRun["Remote machine · This task continues once"]
@@ -139,12 +139,12 @@ These are separate from the initial approval journey. The alpha does not yet hav
 | More remote machines | Mac app → **Import paired target**, after each remote machine's setup | Approve multiple targets from the same Mac. |
 | Retry a connection | Mac app → **Retry connection** | Reconnect a disconnected target after resolving the reported problem. |
 | Remove a target from this Mac | Mac app → **Remove** | Forget its local profile and connection. This does not restore normal sudo on the remote machine or revoke the remote machine's saved pairing by itself. |
-| Ubuntu-password fallback | Administrator-controlled policy on the remote machine | Enabled by default after 90 seconds of ordinary unavailability. Disable it if unanswered requests should always fail; denials and invalid requests never qualify. |
+| Ubuntu-password fallback | Administrator-controlled policy on the remote machine | Enabled by default after 300 seconds of ordinary unavailability. Disable it if unanswered requests should always fail; denials and invalid requests never qualify. |
 | Root-shell restrictions | Administrator-controlled policy on the remote machine | Obvious shells/interpreters are restricted by default; an administrator can relax the policy. This is accident prevention, not a guarantee that an approved installer cannot make powerful changes. |
 | Private-network choice | remote machine connection configuration and paired Mac profile | Select the supported Tailscale or Nord Meshnet path during setup or a deliberate reconfiguration—not an automatic failover toggle. |
 | Stop using Syn | remote-machine recovery / unpair / uninstall tools | Restore ordinary password sudo safely. Unpairing also removes the remote machine's current approver pairing; full file/key cleanup is separate. |
 
-**Fixed in this alpha:** 90 seconds, fresh authentication for every approval, one-use decisions, and no standing grants. TODO 2 proposes **Always approve** for 5, 15, or 30 minutes, or 1 hour, with Mac activity history and a visible stop control. That deliberately replaces per-command human review for the chosen period; an activity log cannot undo an unsafe administrator action. No phone-push or 1Password credential-approval feature exists.
+**Fixed in this alpha:** 300 seconds, fresh authentication for every approval, one-use decisions, and no standing grants. TODO 2 proposes **Always approve** for 5, 15, or 30 minutes, or 1 hour, with Mac activity history and a visible stop control. That deliberately replaces per-command human review for the chosen period; an activity log cannot undo an unsafe administrator action. No phone-push or 1Password credential-approval feature exists.
 
 ## Reading this as a product map
 

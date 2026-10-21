@@ -85,7 +85,7 @@ fn validate_release_commit(value: &str) -> Result<(), ProtocolError> {
 }
 pub const SUDO_ADAPTER_KIND: &str = "org.syn-approvals.sudo";
 pub const SUDO_SCHEMA_VERSION: u16 = 1;
-pub const DEFAULT_TTL_MS: u32 = 90_000;
+pub const DEFAULT_TTL_MS: u32 = 300_000;
 pub const MAX_WIRE_BYTES: usize = 64 * 1024;
 pub const ES256_ALGORITHM: i64 = -7;
 
@@ -322,7 +322,7 @@ impl ApprovalRequestV1 {
             return Err(validation("unsupported adapter kind or schema"));
         }
         if self.ttl_ms != DEFAULT_TTL_MS {
-            return Err(validation("private alpha TTL must be exactly 90 seconds"));
+            return Err(validation("private alpha TTL must be exactly 300 seconds"));
         }
         self.sudo.validate()
     }
@@ -1137,8 +1137,8 @@ mod tests {
         let key = generate_signing_key();
         let mut request =
             ApprovalRequestV1::new("pi-dev".into(), key.verifying_key(), sample_intent());
-        assert_eq!(request.ttl_ms, 90_000);
-        for ttl in [30_000, DEFAULT_TTL_MS - 1, DEFAULT_TTL_MS + 1] {
+        assert_eq!(request.ttl_ms, 300_000);
+        for ttl in [30_000, 90_000, DEFAULT_TTL_MS - 1, DEFAULT_TTL_MS + 1] {
             request.ttl_ms = ttl;
             assert!(request.validate().is_err());
         }
@@ -1160,9 +1160,13 @@ mod tests {
             assert_eq!(request.request.sudo.tty, None);
             assert_eq!(request.request.sudo.non_interactive, non_interactive);
         }
-        let legacy_request =
-            hex::decode(fixture["legacy_30_second_request_hex"].as_str().unwrap()).unwrap();
-        assert!(verify_request(&legacy_request, target.verifying_key()).is_err());
+        for field in [
+            "legacy_30_second_request_hex",
+            "legacy_90_second_request_hex",
+        ] {
+            let legacy_request = hex::decode(fixture[field].as_str().unwrap()).unwrap();
+            assert!(verify_request(&legacy_request, target.verifying_key()).is_err());
+        }
         let request_bytes = hex::decode(fixture["signed_request_hex"].as_str().unwrap()).unwrap();
         let request = verify_request(&request_bytes, target.verifying_key()).unwrap();
         assert_eq!(

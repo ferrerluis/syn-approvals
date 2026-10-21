@@ -7,7 +7,7 @@ Status: design authority for the private alpha.
 For one configured Linux UID, an invocation already accepted by sudoers must not execute unless either:
 
 1. the paired Mac produces a fresh, valid, request-bound approval signature; or
-2. the caller successfully completes Ubuntu PAM authentication in an interactive terminal after pressing Enter while the request is pending, or after the 90-second remote window expires.
+2. the caller successfully completes Ubuntu PAM authentication in an interactive terminal after pressing Enter while the request is pending, or after the 300-second remote window expires.
 
 Syn never turns a network-provided command into a root process. Sudo retains the original argv/environment and performs execution after the approval plug-in returns success.
 
@@ -41,7 +41,7 @@ First setup requires a trusted administrator session outside that agent's contro
 
 Assume the `syn` service account and agent memory are compromised. The attacker can observe request metadata, drop or reorder messages, and fabricate availability failures.
 
-It must not be able to sign target requests or approver decisions. Its maximum authorization impact is denial of service or forcing the documented 90-second password fallback.
+It must not be able to sign target requests or approver decisions. Its maximum authorization impact is denial of service or forcing the documented 300-second password fallback.
 
 ### Tailnet participant or administrator
 
@@ -57,7 +57,7 @@ These are explicitly outside the protection claim. Apple system user presence pe
 - The enforcement plug-in verifies the approval; it does not trust the agent's verdict.
 - Unknown protocol and adapter versions fail closed.
 - Explicit denial, invalid signatures, malformed data, policy blocks, replay, wrong targets, and user cancellation never reach password fallback.
-- Absence or ordinary expiry can reach fallback only after 90 seconds and only with an interactive terminal.
+- Absence or ordinary expiry can reach fallback only after 300 seconds and only with an interactive terminal.
 - No approval cache, batching, remembered command, or pattern grant exists.
 - Environment values are not sent to the Mac; their framed digest is bound to the request.
 - Syn logs hashes and result metadata, never passwords, private keys, pairing secrets, environment values, or full argv.

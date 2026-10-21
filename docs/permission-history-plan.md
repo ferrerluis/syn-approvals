@@ -23,7 +23,7 @@ Verify the actual update finishes without fingerprint requests and that failed v
 | Order | Action | Required result |
 |---|---|---|
 | 1 | Computer Use clicks Deny | SSH nonzero; Mac and Pi show Denied |
-| 2 | Leave untouched for the 90-second deadline | SSH nonzero; Mac and Pi show Timed out |
+| 2 | Leave untouched for the 300-second deadline | SSH nonzero; Mac and Pi show Timed out |
 | 3 | Computer Use clicks Approve, then user authenticates | SSH zero; Mac and Pi show Approved |
 
 Match the two histories by request ID, then restart the Mac app and verify all three records remain visible. Only the final approval case should require user presence. Logging failures must remain visible without affecting permission behavior.

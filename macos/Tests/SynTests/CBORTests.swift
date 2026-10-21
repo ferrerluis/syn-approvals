@@ -14,6 +14,7 @@ private struct GoldenFixture: Decodable {
     let signedWrongCommitRequestHex: String
     let requestPayloadHashHex: String
     let legacy30SecondRequestHex: String
+    let legacy90SecondRequestHex: String
     let signedNoTTYRequestHex: String
     let signedNoTTYNoninteractiveRequestHex: String
 
@@ -24,6 +25,7 @@ private struct GoldenFixture: Decodable {
         case signedWrongCommitRequestHex = "signed_wrong_commit_request_hex"
         case requestPayloadHashHex = "request_payload_hash_hex"
         case legacy30SecondRequestHex = "legacy_30_second_request_hex"
+        case legacy90SecondRequestHex = "legacy_90_second_request_hex"
         case signedNoTTYRequestHex = "signed_no_tty_request_hex"
         case signedNoTTYNoninteractiveRequestHex = "signed_no_tty_noninteractive_request_hex"
     }
@@ -103,7 +105,7 @@ private struct LegacyGoldenFixture: Decodable {
     #expect(request.payloadHash.hex == fixture.requestPayloadHashHex)
     #expect(SafeDisplay.render(request.executable) == "\"/usr/bin/apt\"")
     #expect(request.arguments.map(SafeDisplay.render) == ["\"apt\"", "\"install\"", "\"gh\""])
-    #expect(request.expiresAt.timeIntervalSince(request.issuedAt) == 90)
+    #expect(request.expiresAt.timeIntervalSince(request.issuedAt) == 300)
     #expect(request.releaseID == ReleaseIdentity.current.releaseID)
     #expect(request.releaseCommit == SynProtocol.developmentCommit)
     for signed in [fixture.signedWrongReleaseRequestHex, fixture.signedWrongCommitRequestHex] {
@@ -115,8 +117,10 @@ private struct LegacyGoldenFixture: Decodable {
         let request = try SynProtocol.verifyRequest(Data(hex: signed), target: target)
         #expect(request.arguments.map(SafeDisplay.render) == ["\"apt\"", "\"install\"", "\"gh\""])
     }
-    #expect(throws: SynProtocolError.self) {
-        _ = try SynProtocol.verifyRequest(Data(hex: fixture.legacy30SecondRequestHex), target: target)
+    for signed in [fixture.legacy30SecondRequestHex, fixture.legacy90SecondRequestHex] {
+        #expect(throws: SynProtocolError.self) {
+            _ = try SynProtocol.verifyRequest(Data(hex: signed), target: target)
+        }
     }
 }
 

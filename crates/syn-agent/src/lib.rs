@@ -33,7 +33,7 @@ use tracing::{info, warn};
 
 const REQUEST_BROADCAST_CAPACITY: usize = 64;
 // Setup can need an initial macOS Keychain permission. This budget does not
-// extend the signed command's 90-second TTL or create an approval grant.
+// extend the signed command's 300-second TTL or create an approval grant.
 const TLS_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_APPROVER_CONNECTIONS: usize = 4;
 
@@ -958,7 +958,7 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 mod tests {
     #[test]
     fn configuration_and_signed_request_deadlines_agree() {
-        assert_eq!(syn_config::APPROVAL_TIMEOUT_SECONDS, 90);
+        assert_eq!(syn_config::APPROVAL_TIMEOUT_SECONDS, 300);
         assert_eq!(
             syn_config::APPROVAL_TIMEOUT_SECONDS * 1_000,
             u64::from(syn_protocol::DEFAULT_TTL_MS)
@@ -1280,12 +1280,12 @@ mod tests {
         let signed = sign_request(&request, &key).unwrap();
         let verified = verify_request(&signed, key.verifying_key()).unwrap();
         let now = Instant::now();
-        let expired = history_deadline(&verified, request.issued_at_unix_ms + 90_001, now);
+        let expired = history_deadline(&verified, request.issued_at_unix_ms + 300_001, now);
         assert_eq!(expired, now);
-        let remaining = history_deadline(&verified, request.issued_at_unix_ms + 89_999, now);
+        let remaining = history_deadline(&verified, request.issued_at_unix_ms + 299_999, now);
         assert_eq!(remaining, now + Duration::from_millis(1));
         let receipt =
-            RequestResultV1::for_request(&verified, 3, request.issued_at_unix_ms + 90_000);
+            RequestResultV1::for_request(&verified, 3, request.issued_at_unix_ms + 300_000);
         receipt.validate().unwrap();
         let encoded = encode_canonical(&receipt).unwrap();
         let decoded: RequestResultV1 = syn_protocol::decode_canonical(&encoded).unwrap();

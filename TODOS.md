@@ -44,7 +44,7 @@ Delivery plan: [Syn: simpler installation and updates](docs/distribution-onboard
 ### 1.5 Documentation and validation
 
 - [ ] README: Mac download → SSH/network prerequisites → Add a machine → first approval → password access → settings → update/recovery/uninstall. Use “remote machine”; keep Raspberry Pi 5 as a validated example.
-- [ ] Explain the 90-second wait, Enter-to-password, explicit denial, sleep/offline behavior, SSH/Keychain prompts and private-signing limits. Never tell users to disable Mac protections globally.
+- [ ] Explain the 300-second wait, Enter-to-password, explicit denial, sleep/offline behavior, SSH/Keychain prompts and private-signing limits. Never tell users to disable Mac protections globally.
 - [ ] Use small Sol work packages and built-in Codex messages. Implementation agents test components; one dedicated final Sol agent owns the sequential E2E suite and all Computer Use or live Mac/remote-machine actions. The orchestrator reviews evidence and routes fixes without competing device use.
 - [ ] Complete the [12-case E2E checklist](docs/onboarding-e2e-test-plan.md): actual uninstall from the Mac and remote machine, clean Mac-led reinstall, approvals/password escape, real LAN and hostname connections, matching-version upgrades, offline retry, and interrupted/reboot recovery. Keep exhaustive failure variants in automated component tests; group real authentication in the final coordinated window and finish with working installations on both devices. Use Raspberry Pi 5 as the tested remote-machine example, not as a requirement.
 
@@ -73,7 +73,7 @@ The Enter-to-password state machine and adversarial automated tests are implemen
 
 ### Press Enter to use the password now
 
-- [ ] Implement an interactive wait prompt: **“Waiting for Syn approval. Press Enter to use this machine's password instead.”** Pressing Enter once should leave the pending Mac-approval path and start the protected remote password prompt immediately, without the 90-second wait.
+- [ ] Implement an interactive wait prompt: **“Waiting for Syn approval. Press Enter to use this machine's password instead.”** Pressing Enter once should leave the pending Mac-approval path and start the protected remote password prompt immediately, without the 300-second wait.
 - [ ] Cancel/invalidate the pending Mac request before starting password authentication; a late Mac approval must not create a second completion or authorize a later command. Preserve the original invocation instead of reconstructing or re-running a command from a string.
 - [ ] Make this the standard path whenever interactive authentication is supported. No prompt for `sudo -n`, absent/closed terminals or redirected input masquerading as a user's terminal.
 - [ ] Treat Enter as a request to authenticate, never as human-presence evidence or approval. An agent that simulates Enter still needs the actual account password.
