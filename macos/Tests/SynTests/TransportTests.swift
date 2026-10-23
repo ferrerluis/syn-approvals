@@ -4,6 +4,59 @@ import Security
 import Testing
 @testable import Syn
 
+@Test @MainActor func silentPeerAndBlockedSendTriggerRecovery() async throws {
+    let heartbeat = ConnectionHeartbeat()
+    let (events, result) = AsyncStream<Void>.makeStream()
+    heartbeat.start(interval: .seconds(30), timeout: .milliseconds(50), send: { _ in
+        // A wedged send must not postpone the independent response deadline.
+        try await Task.sleep(for: .seconds(30))
+    }, failed: { result.yield(()) })
+    defer { heartbeat.stop(); result.finish() }
+    try await nextHeartbeatEvent(events)
+}
+
+@Test @MainActor func unrelatedPongCannotKeepDeadConnectionAlive() async throws {
+    let heartbeat = ConnectionHeartbeat()
+    let (events, result) = AsyncStream<Void>.makeStream()
+    heartbeat.start(interval: .seconds(30), timeout: .milliseconds(50), send: { _ in
+        heartbeat.receivedPong(Data("old connection".utf8))
+    }, failed: { result.yield(()) })
+    defer { heartbeat.stop(); result.finish() }
+    try await nextHeartbeatEvent(events)
+}
+
+@Test @MainActor func responsivePeerSurvivesRepeatedHeartbeatsAndStopCancelsDeadline() async throws {
+    let heartbeat = ConnectionHeartbeat()
+    let (events, result) = AsyncStream<Void>.makeStream()
+    var failed = false
+    var rounds = 0
+    heartbeat.start(interval: .milliseconds(10), timeout: .milliseconds(100), send: { nonce in
+        rounds += 1
+        heartbeat.receivedPong(nonce)
+        if rounds == 2 { result.yield(()) }
+    }, failed: { failed = true; result.yield(()) })
+    defer { heartbeat.stop(); result.finish() }
+    try await nextHeartbeatEvent(events)
+    #expect(rounds >= 2)
+    #expect(!failed)
+    heartbeat.start(timeout: .milliseconds(50), send: { _ in }, failed: { failed = true })
+    heartbeat.stop()
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(!failed)
+}
+
+private func nextHeartbeatEvent(_ events: AsyncStream<Void>) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask { for await _ in events { return } }
+        group.addTask {
+            try await Task.sleep(for: .seconds(5))
+            throw URLError(.timedOut)
+        }
+        try await group.next()
+        group.cancelAll()
+    }
+}
+
 @Test func completedEmptyTransportCallbackReconnectsButMalformedContentDoesNot() {
     let closed = TargetConnection.missingMetadataError(data: nil, isComplete: true) as? URLError
     #expect(closed?.code == .networkConnectionLost)

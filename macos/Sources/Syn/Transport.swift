@@ -38,6 +38,47 @@ final class HandshakeProgress: @unchecked Sendable {
     }
 }
 
+// An idle TCP stream can survive a target reboot locally without reporting an
+// error. Require a round trip, including when a send itself never completes.
+@MainActor
+final class ConnectionHeartbeat {
+    private var task: Task<Void, Never>?
+    private var expectedPong: Data?
+
+    func start(
+        interval: Duration = .seconds(15), timeout: Duration = .seconds(10),
+        send: @escaping @MainActor (Data) async throws -> Void,
+        failed: @escaping @MainActor () -> Void
+    ) {
+        stop()
+        task = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let nextProbe = ContinuousClock.now.advanced(by: interval)
+                let nonce = Data(UUID().uuidString.utf8)
+                self.expectedPong = nonce
+                let sender = Task { try await send(nonce) }
+                do { try await Task.sleep(for: timeout) }
+                catch { sender.cancel(); return }
+                sender.cancel()
+                guard self.expectedPong == nil else { failed(); return }
+                do { try await ContinuousClock().sleep(until: nextProbe) }
+                catch { return }
+            }
+        }
+    }
+
+    func receivedPong(_ body: Data) {
+        if body == expectedPong { expectedPong = nil }
+    }
+
+    func stop() {
+        task?.cancel()
+        task = nil
+        expectedPong = nil
+    }
+}
+
 // Network.framework permits per-connection trust without weakening ATS globally
 // or installing a target certificate in the system trust store.
 @MainActor
@@ -46,6 +87,8 @@ final class TargetConnection {
     private let onMessage: @Sendable (Result<WireMessage, Error>) -> Void
     private var connection: NWConnection?
     private var connectionDeadline: Task<Void, Never>?
+    private let heartbeat = ConnectionHeartbeat()
+    private var heartbeatStarted = false
     private var handshake = HandshakeProgress()
     static let setupTimeoutSeconds: Double = 130
 
@@ -149,6 +192,8 @@ final class TargetConnection {
     }
 
     func stop() {
+        heartbeat.stop()
+        heartbeatStarted = false
         connectionDeadline?.cancel()
         connectionDeadline = nil
         let previous = connection
@@ -162,10 +207,28 @@ final class TargetConnection {
         let data = try wire.encoded()
         let metadata = NWProtocolWebSocket.Metadata(opcode: .binary)
         let context = NWConnection.ContentContext(identifier: "syn-binary", metadata: [metadata])
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                })
+            }
+        } catch {
+            if self.connection === connection { fail(error) }
+            throw error
+        }
+        guard self.connection === connection else { throw URLError(.cancelled) }
+        // The target requires HELLO as the first client frame. Heartbeats may
+        // start only after that frame has been successfully sent.
+        if wire.kind == .hello && !heartbeatStarted {
+            heartbeatStarted = true
+            heartbeat.start(send: { [weak self, weak connection] nonce in
+                guard let self, let connection, self.connection === connection else { return }
+                try await self.send(.init(kind: .ping, body: nonce))
+            }, failed: { [weak self, weak connection] in
+                guard let self, let connection, self.connection === connection else { return }
+                self.fail(URLError(.timedOut))
             })
         }
     }
@@ -183,7 +246,9 @@ final class TargetConnection {
                 case .binary:
                     do {
                         guard let data, data.count <= 64 * 1024 else { throw TransportError.unexpectedMessage }
-                        self.onMessage(.success(try WireMessage(data: data)))
+                        let message = try WireMessage(data: data)
+                        if message.kind == .pong { self.heartbeat.receivedPong(message.body) }
+                        self.onMessage(.success(message))
                     } catch { self.fail(error); return }
                 case .ping, .pong: break
                 case .close: self.fail(URLError(.networkConnectionLost)); return
