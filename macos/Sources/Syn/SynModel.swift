@@ -809,7 +809,9 @@ final class SynModel: ObservableObject {
         reconnectTasks[target.targetID] = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(base + jitter)) }
             catch { return }
-            guard let self, self.targets.contains(target),
+            // A verified HELLO refreshes saved release metadata. The connection
+            // still holds its original record, so compare stable machine IDs.
+            guard let self, self.targets.contains(where: { $0.targetID == target.targetID }),
                   !self.pausedConnections.contains(target.targetID),
                   !self.connectedTargets.contains(target.targetID) else { return }
             self.connections[target.targetID]?.start()
