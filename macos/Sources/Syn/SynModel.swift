@@ -43,6 +43,7 @@ final class SynModel: ObservableObject {
     @Published var addMachineUsername = ""
     @Published var addMachinePort = ""
     @Published private(set) var addMachineState: AddMachineState = .idle
+    @Published private(set) var setupActivity: SetupActivity?
     @Published private(set) var maintenanceBootstrapCommand: String?
     @Published private(set) var approverIdentityText = "Generate the Mac identities before pairing."
     var openMainWindow: (() -> Void)?
@@ -172,6 +173,7 @@ final class SynModel: ObservableObject {
         settingsOverride: SSHConnectionSettings?
     ) {
         setupTask?.cancel()
+        setupActivity = nil
         maintenanceBootstrapCommand = nil
         let port: UInt16?
         if addMachinePort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -295,6 +297,8 @@ final class SynModel: ObservableObject {
         let keyStore = self.signingProvider
         let identityStore = transportIdentityStore
         let coordinator = onboardingCoordinator
+        setupActivity = SetupActivity()
+        setupActivity?.record(.staging)
         addMachineState = .installing(.staging)
         setupTask = Task { [weak self] in
             do {
@@ -316,6 +320,7 @@ final class SynModel: ObservableObject {
                         settings: settings, identity: maintenance, helper: helper.descriptor
                     )
                     guard let self else { return }
+                    self.setupActivity?.finish(.needsMaintenance)
                     self.maintenanceBootstrapCommand = command
                     self.addMachineState = requiresRecovery ? .updateRequired : .readyToInstall
                     return
@@ -350,9 +355,15 @@ final class SynModel: ObservableObject {
                     requiresRecovery: requiresRecovery,
                     configureTarget: { target in
                         try await model.prepareProvisionalTarget(target)
+                    },
+                    diagnostic: { event in
+                        await MainActor.run { model.setupActivity?.record(event) }
                     }
                 ) { phase in
-                    await MainActor.run { model.addMachineState = .installing(phase) }
+                    await MainActor.run {
+                        model.setupActivity?.record(phase)
+                        model.addMachineState = .installing(phase)
+                    }
                 }
                 guard let self else { return }
                 try self.validate(target)
@@ -368,11 +379,14 @@ final class SynModel: ObservableObject {
                 self.addMachineState = .installed(
                     releaseID: request.releaseID, configuration: "configured"
                 )
+                self.setupActivity?.finish(.completed)
                 if self.keysReady { self.connect(target) }
             } catch is CancellationError {
+                self?.setupActivity?.finish(.cancelled)
                 self?.removeProvisionalTarget(targetID)
                 self?.addMachineState = .idle
             } catch {
+                self?.setupActivity?.finish(.failed)
                 self?.removeProvisionalTarget(targetID)
                 self?.addMachineState = .failed(error.localizedDescription)
             }

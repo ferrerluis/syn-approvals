@@ -31,7 +31,10 @@ struct SSHProbeProcess: Sendable {
     }
 #endif
 
-    func run(arguments: [String], privateStandardInput: Data? = nil) async throws -> SSHProbeOutput {
+    func run(
+        arguments: [String], privateStandardInput: Data? = nil,
+        setupProgress: @Sendable (SetupDiagnosticEvent) async -> Void = { _ in }
+    ) async throws -> SSHProbeOutput {
         try Task.checkCancellation()
         guard privateStandardInput.map({ $0.count <= 4_096 }) != false else {
             throw SSHProbeFailure.invalidOutput
@@ -42,12 +45,19 @@ struct SSHProbeProcess: Sendable {
             let deadline = ContinuousClock.now.advanced(by: timeout)
             var captured = Data()
             var diagnostics = Data()
+            var parsedBytes = 0
+            var parser = SetupDiagnosticParser()
             while true {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { throw SSHProbeFailure.timedOut }
                 try child.drain(captured: &captured, diagnostics: &diagnostics)
-                if try child.hasExited() {
-                    try child.drain(captured: &captured, diagnostics: &diagnostics)
+                let exited = try child.hasExited()
+                if exited { try child.drain(captured: &captured, diagnostics: &diagnostics) }
+                for event in parser.consume(Data(diagnostics.dropFirst(parsedBytes))) {
+                    await setupProgress(event)
+                }
+                parsedBytes = diagnostics.count
+                if exited {
                     let status = child.finishAfterExit()
                     return SSHProbeOutput(status: status, stdout: captured, diagnostics: diagnostics)
                 }

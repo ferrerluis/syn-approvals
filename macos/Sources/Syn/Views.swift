@@ -318,6 +318,9 @@ private struct SetupView: View {
                     Label(message, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.red)
                 }
+                if let activity = model.setupActivity {
+                    SetupActivityView(activity: activity)
+                }
             }
             Section("Machines") {
                 ForEach(model.targets) { target in
@@ -374,5 +377,45 @@ private struct SetupView: View {
         Button(model.maintenanceBootstrapCommand == nil ? "Install or update Syn" : "I've run the command — continue") {
             model.installCheckedMachine()
         }
+    }
+}
+
+
+private struct SetupActivityView: View {
+    let activity: SetupActivity
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Elapsed \(activity.elapsed(at: context.date))")
+                        .monospacedDigit()
+                    if activity.finishedAt == nil {
+                        Text("In progress: \(activity.entries.last?.message ?? "Preparing update")")
+                            .foregroundStyle(.secondary)
+                    }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(activity.entries) { entry in
+                                HStack(alignment: .top, spacing: 12) {
+                                    Text(entry.elapsed).monospacedDigit().foregroundStyle(.secondary)
+                                    Text(entry.message)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 220)
+                    .textSelection(.enabled)
+                    Text("Activity only. Passwords and raw command output are excluded.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            }
+        } label: {
+            Text(expanded ? "See less" : "See more")
+        }
+        .id(activity.startedAt)
     }
 }

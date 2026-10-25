@@ -28,6 +28,15 @@ private actor CoordinatorRunnerFixture: SSHPrivilegedRunning {
     init(_ behavior: Behavior = .success) { self.behavior = behavior }
 
     func run(
+        settings: SSHConnectionSettings, operation: SSHPrivilegedOperation,
+        identity: SSHMaintenanceIdentity,
+        setupProgress: @escaping @Sendable (SetupDiagnosticEvent) async -> Void
+    ) async throws -> SSHProbeOutput {
+        if case .build = operation { await setupProgress(.compilingPackage) }
+        return try await run(settings: settings, operation: operation, identity: identity)
+    }
+
+    func run(
         settings: SSHConnectionSettings,
         operation: SSHPrivilegedOperation,
         identity: SSHMaintenanceIdentity
@@ -71,6 +80,7 @@ private actor CoordinatorRunnerFixture: SSHPrivilegedRunning {
     defer { fixture.cleanup() }
     let transfer = CoordinatorTransferFixture()
     let runner = CoordinatorRunnerFixture()
+    let events = CoordinatorEventRecorder()
     let target = try await RemoteOnboardingCoordinator(transfer: transfer, privileged: runner).run(
         request: fixture.request, stagedRequest: fixture.stagedRequest,
         source: fixture.source, helper: fixture.helper, settings: fixture.settings,
@@ -78,8 +88,10 @@ private actor CoordinatorRunnerFixture: SSHPrivilegedRunning {
         configureTarget: { provisional in
             #expect(provisional.targetID == "pi")
             #expect(await runner.calls.last == .configure(operationID: fixture.request.operationID))
-        }
+        },
+        diagnostic: { await events.record($0) }
     )
+    #expect(await events.events == [.compilingPackage])
     #expect(await transfer.calls == 1)
     #expect(await runner.calls == [
         .probe,
@@ -245,4 +257,9 @@ private func coordinatorArtifacts() throws -> CoordinatorArtifacts {
         source: try verifiedSource.makePrivateTransferCopy(),
         helper: try verifiedHelper.makePrivateTransferCopy()
     )
+}
+
+private actor CoordinatorEventRecorder {
+    var events: [SetupDiagnosticEvent] = []
+    func record(_ event: SetupDiagnosticEvent) { events.append(event) }
 }

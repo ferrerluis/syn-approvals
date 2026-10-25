@@ -7,6 +7,21 @@ protocol SSHPrivilegedRunning: Sendable {
         operation: SSHPrivilegedOperation,
         identity: SSHMaintenanceIdentity
     ) async throws -> SSHProbeOutput
+    func run(
+        settings: SSHConnectionSettings, operation: SSHPrivilegedOperation,
+        identity: SSHMaintenanceIdentity,
+        setupProgress: @escaping @Sendable (SetupDiagnosticEvent) async -> Void
+    ) async throws -> SSHProbeOutput
+}
+
+extension SSHPrivilegedRunning {
+    func run(
+        settings: SSHConnectionSettings, operation: SSHPrivilegedOperation,
+        identity: SSHMaintenanceIdentity,
+        setupProgress: @escaping @Sendable (SetupDiagnosticEvent) async -> Void
+    ) async throws -> SSHProbeOutput {
+        try await run(settings: settings, operation: operation, identity: identity)
+    }
 }
 
 struct SystemSSHPrivilegedRunner: SSHPrivilegedRunning {
@@ -15,12 +30,21 @@ struct SystemSSHPrivilegedRunner: SSHPrivilegedRunning {
         operation: SSHPrivilegedOperation,
         identity: SSHMaintenanceIdentity
     ) async throws -> SSHProbeOutput {
+        try await run(settings: settings, operation: operation, identity: identity, setupProgress: { _ in })
+    }
+
+    func run(
+        settings: SSHConnectionSettings, operation: SSHPrivilegedOperation,
+        identity: SSHMaintenanceIdentity,
+        setupProgress: @escaping @Sendable (SetupDiagnosticEvent) async -> Void
+    ) async throws -> SSHProbeOutput {
         let route = try await settings.resolvedMaintenanceRoute()
         return try await SSHProbeProcess(timeout: operation.timeout).run(
             arguments: settings.maintenanceArguments(
                 for: operation, identityFile: identity.privateKeyURL,
                 synKnownHosts: try settings.preparedSynKnownHostsURL(), route: route
-            )
+            ),
+            setupProgress: setupProgress
         )
     }
 }
@@ -86,6 +110,7 @@ struct RemoteOnboardingCoordinator: Sendable {
         identity: SSHMaintenanceIdentity,
         requiresRecovery: Bool = false,
         configureTarget: @escaping ConfigureTarget = { _ in },
+        diagnostic: @escaping @Sendable (SetupDiagnosticEvent) async -> Void = { _ in },
         progress: @escaping Progress = { _ in }
     ) async throws -> TargetRecord {
         var activationAttempted = false
@@ -128,7 +153,8 @@ struct RemoteOnboardingCoordinator: Sendable {
 
             await progress(.building)
             let build = try await execute(
-                .build(operationID: request.operationID), settings: settings, identity: identity
+                .build(operationID: request.operationID), settings: settings, identity: identity,
+                diagnostic: diagnostic
             )
             try verifyPhase(build, operationID: request.operationID,
                             releaseID: request.releaseID, phase: "package_built")
@@ -206,10 +232,13 @@ struct RemoteOnboardingCoordinator: Sendable {
     private func execute(
         _ operation: SSHPrivilegedOperation,
         settings: SSHConnectionSettings,
-        identity: SSHMaintenanceIdentity
+        identity: SSHMaintenanceIdentity,
+        diagnostic: @escaping @Sendable (SetupDiagnosticEvent) async -> Void = { _ in }
     ) async throws -> Data {
         try Task.checkCancellation()
-        let output = try await privileged.run(settings: settings, operation: operation, identity: identity)
+        let output = try await privileged.run(
+            settings: settings, operation: operation, identity: identity, setupProgress: diagnostic
+        )
         guard output.status == 0 else { throw RemoteOnboardingCoordinatorError.remoteFailed }
         guard !output.stdout.isEmpty, output.stdout.count <= 65_536 else {
             throw RemoteOnboardingCoordinatorError.invalidResponse

@@ -506,6 +506,12 @@ fn validate_existing_prepared_operation(
     Ok(())
 }
 
+// Informational fixed vocabulary on stderr; stdout remains the verified JSON reply.
+// Never forward child output or include paths, identities or command arguments.
+fn emit_build_progress(event: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "SYN_SETUP_EVENT_V1 {event}");
+}
+
 pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
     require_root()?;
     let _onboarding = OnboardingLock::acquire()?;
@@ -527,6 +533,9 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
     if Path::new(DEFAULT_INSTALL_STATE).exists() {
         bail!("restore ordinary password sudo before building an update");
     }
+    if apply {
+        emit_build_progress("checking_dependencies");
+    }
     let missing = missing_dependencies()?;
     let report = BuildReport {
         operation_id: operation_id.into(),
@@ -545,6 +554,7 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
     ensure_build_root()?;
     ensure_build_account()?;
     if !missing.is_empty() {
+        emit_build_progress("installing_dependencies");
         run_quiet("/usr/bin/apt-get", &["update"])?;
         let mut arguments = vec!["install", "-y", "--no-install-recommends"];
         arguments.extend(BUILD_DEPENDENCIES.iter().copied());
@@ -576,6 +586,7 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
         )?;
         chown(&build_source, "root", BUILD_USER)?;
         fs::set_permissions(&build_source, fs::Permissions::from_mode(0o440))?;
+        emit_build_progress("extracting_source");
         run_clean_quiet(
             "/usr/sbin/runuser",
             &[
@@ -638,10 +649,12 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        emit_build_progress("compiling_package");
         let status = run_isolated_build(&mut command)?;
         if !status.success() {
             bail!("isolated remote build failed");
         }
+        emit_build_progress("verifying_package");
         let package =
             output_directory.join(format!("syn-approvals_{}_arm64.deb", request.release_id));
         let protected_package = operation.join("syn-approvals.deb");
@@ -662,6 +675,7 @@ pub fn build(operation_id: &str, apply: bool) -> Result<BuildReport> {
     journal.phase = "package_built".into();
     journal.package_sha256 = Some(package_sha256.clone());
     write_journal(&operation, &journal)?;
+    emit_build_progress("package_ready");
     Ok(BuildReport {
         package_sha256,
         dependencies_installed: true,
