@@ -140,7 +140,7 @@ These are separate from the initial approval journey. The alpha does not yet hav
 | Retry a connection | Mac app → **Retry connection** | Reconnect a disconnected target after resolving the reported problem. |
 | Remove a target from this Mac | Mac app → **Remove** | Forget its local profile and connection. This does not restore normal sudo on the remote machine or revoke the remote machine's saved pairing by itself. |
 | Ubuntu-password fallback | Administrator-controlled policy on the remote machine | Enabled by default after 300 seconds of ordinary unavailability. Disable it if unanswered requests should always fail; denials and invalid requests never qualify. |
-| Root-shell restrictions | Administrator-controlled policy on the remote machine | Obvious shells/interpreters are restricted by default; an administrator can relax the policy. This is accident prevention, not a guarantee that an approved installer cannot make powerful changes. |
+| Root-shell restrictions | Administrator-controlled remote-approval policy | Shells, interpreters and restricted sudo modes require a fresh local password in an interactive terminal by default, without waiting for remote approval. An administrator can change remote eligibility. A root shell remains privileged until you exit it. |
 | Private-network choice | remote machine connection configuration and paired Mac profile | Select the supported Tailscale or Nord Meshnet path during setup or a deliberate reconfiguration—not an automatic failover toggle. |
 | Stop using Syn | remote-machine recovery / unpair / uninstall tools | Restore ordinary password sudo safely. Unpairing also removes the remote machine's current approver pairing; full file/key cleanup is separate. |
 

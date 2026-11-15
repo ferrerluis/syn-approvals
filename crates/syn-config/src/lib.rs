@@ -237,10 +237,14 @@ pub struct Policy {
     pub max_pending: usize,
     #[serde(default = "default_true")]
     pub password_fallback_on_timeout: bool,
+    /// Allow listed executables on the remote approval path. When false,
+    /// blocked executables require fresh local interactive PAM authentication.
     #[serde(default)]
     pub allow_interactive_root: bool,
+    /// Sudo modes eligible for remote approval; other modes require local PAM.
     #[serde(default = "default_allowed_modes")]
     pub allowed_modes: Vec<String>,
+    /// Executable basenames excluded from remote approval by default.
     #[serde(default = "default_blocked_executables")]
     pub blocked_executables: Vec<String>,
 }

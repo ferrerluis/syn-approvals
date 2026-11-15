@@ -7,7 +7,7 @@ Status: design authority for the private alpha.
 For one configured Linux UID, an invocation already accepted by sudoers must not execute unless either:
 
 1. the paired Mac produces a fresh, valid, request-bound approval signature; or
-2. the caller successfully completes Ubuntu PAM authentication in an interactive terminal after pressing Enter while the request is pending, or after the 300-second remote window expires.
+2. the caller successfully completes fresh Ubuntu PAM authentication in an interactive terminal, either immediately for a command or sudo mode excluded from remote approval, after pressing Enter while a remote request is pending, or after the 300-second remote window expires.
 
 Syn never turns a network-provided command into a root process. Sudo retains the original argv/environment and performs execution after the approval plug-in returns success.
 
@@ -23,7 +23,7 @@ Syn never turns a network-provided command into a root process. Sudo retains the
 | Mac transport identity | ordinary Keychain item | connecting the paired Mac and signing denials |
 | Mac approval key | Secure Enclave, user-presence gated | signing one-use approvals |
 | macOS account | user-controlled | correct review and local user-presence authentication |
-| Ubuntu PAM stack | root process | password authentication after pending Enter selection or eligible timeout |
+| Ubuntu PAM stack | root process | fresh local authentication for commands excluded from remote approval, pending Enter selection, or eligible timeout |
 | Restricted maintenance SSH key | Mac-readable only | authorizing fixed privileged Syn installation operations |
 | Retained maintenance dispatcher | root-owned | verifying selected helper bytes and routing fixed lifecycle operations |
 
@@ -56,7 +56,8 @@ These are explicitly outside the protection claim. Apple system user presence pe
 - Approval is bound to protocol version, target, adapter, nonce, request ID, request hash, execution intent, and live local deadline.
 - The enforcement plug-in verifies the approval; it does not trust the agent's verdict.
 - Unknown protocol and adapter versions fail closed.
-- Explicit denial, invalid signatures, malformed data, policy blocks, replay, wrong targets, and user cancellation never reach password fallback.
+- Explicit denial, invalid signatures, malformed data, configuration/identity/environment policy failures, replay, wrong targets, and user cancellation never reach password fallback.
+- Executable and sudo-mode restrictions are remote-approval restrictions. After configuration, identity and environment validation, a restricted invocation can proceed only through fresh local PAM in an interactive canonical terminal. Noninteractive calls and missing or invalid terminals are denied without prompting. No remote request is created, and sudo retains the exact invocation for execution.
 - Absence or ordinary expiry can reach fallback only after 300 seconds and only with an interactive terminal.
 - No approval cache, batching, remembered command, or pattern grant exists.
 - Environment values are not sent to the Mac; their framed digest is bound to the request.
@@ -64,7 +65,9 @@ These are explicitly outside the protection claim. Apple system user presence pe
 
 ## Root-shell policy limitation
 
-Syn blocks obvious interactive root shells and interpreters as an accident guard. This is not containment: an approved package installer or file-writing command can install a service, modify sudoers, or otherwise obtain persistent root authority.
+Syn excludes obvious interactive root shells and interpreters from remote approval by default. A local administrator can still run them, including `sudo -i`, `sudo -s`, and Python scripts, by authenticating with the machine's password for each invocation. Existing `allowed_modes`, `blocked_executables`, and `allow_interactive_root` settings continue to select remote eligibility; no policy-file migration or timeout-fallback setting is required for manual authentication.
+
+Terminal presence does not identify a human. An agent can allocate a terminal but must still complete PAM, including account checks; sudo timestamps and prior Syn approvals cannot satisfy this path. This is a deliberate manual-administration path, not a retry after a completed denial or an integrity failure. It grants no Syn cache or standing approval. However, an authenticated root shell permits subsequent commands until it exits, and a script can perform multiple privileged operations. This is not containment: an approved package installer or file-writing command can also install a service, modify sudoers, or otherwise obtain persistent root authority.
 
 ## Residual risks
 

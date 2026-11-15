@@ -4,6 +4,8 @@ managed_user = "luis"
 timeout_seconds = 300
 max_pending = 16
 password_fallback_on_timeout = true
+# These restrictions govern remote approval. Interactive commands excluded here
+# require fresh local password authentication, even when timeout fallback is off.
 allow_interactive_root = false
 allowed_modes = ["run"]
 blocked_executables = [

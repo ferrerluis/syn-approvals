@@ -14,7 +14,11 @@
 | Slow socket header/body or blocked write | One absolute deadline; progress never restarts it |
 | EOF partway through a frame | Malformed; no password fallback |
 | Unknown protocol/adapter/schema | Hard deny |
-| Local shell policy block | Hard deny before notification |
+| Shell, interpreter, or sudo mode excluded from remote approval; interactive terminal | Fresh local PAM; execute original invocation only on success, without notification or remote wait |
+| Same restricted command with `sudo -n`, no terminal, a pipe, or invalid/raw terminal | Deny without PAM or notification |
+| Restricted command; wrong/canceled password or PAM error | Deny; no remote request or fallback to an earlier approval |
+| Restricted command repeated after successful local password | Require fresh authentication again; no sudo timestamp reuse |
+| Invalid configuration, identity, or final environment | Hard deny before remote approval or manual authentication |
 | Ctrl-C / closed request connection | Cancel and reject late decision |
 | Compromised agent fabricates allow | Plug-in signature verification rejects |
 | Agent is unavailable | Timeout path only; never implicit allow |
