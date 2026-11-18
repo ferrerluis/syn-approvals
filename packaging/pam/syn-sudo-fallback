@@ -1,4 +1,5 @@
 #%PAM-1.0
-# Syn invokes this service only after an interactive 300-second timeout.
+# Syn requires fresh authentication here for manual commands excluded from
+# remote approval, pending Enter selection, eligible timeout, and local recovery.
 @include common-auth
 @include common-account

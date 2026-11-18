@@ -44,9 +44,12 @@ Syn shows the remote machine, source account, executable, arguments, and time re
 | **Approve** | The signed approval lets that invocation proceed once. |
 | **Deny** | A signed denial received by the remote machine stops the invocation without password fallback. If the Mac cannot confirm delivery, check the original remote terminal; it may still offer password fallback after timeout. |
 | Press Enter while an interactive request is pending | Syn cancels the request and opens the machine's normal password prompt immediately. |
+| Run a shell, interpreter, or sudo mode excluded from remote approval | In an interactive terminal, Syn asks for this machine's password immediately. Successful authentication permits that invocation; `sudo -n` and commands without an interactive terminal are denied. |
 | No Mac decision within 300 seconds | An interactive terminal may offer the normal password prompt. Unanswered non-interactive `sudo` fails without a prompt; it can still succeed if approved on the Mac. |
 
-The remote sudo plug-in signs the executable, separate arguments, working directory, identities, and environment digest for the invocation already accepted by sudo policy. Invalid data, replay, and local policy rejection fail closed. During everyday sudo use, the remote account password stays in the remote PAM conversation: Syn does not send it to the Mac, save it, or place it in command arguments.
+The remote sudo plug-in signs the executable, separate arguments, working directory, identities, and environment digest for the invocation already accepted by sudo policy. Invalid data, replay, and configuration, identity, or environment failures fail closed. During everyday sudo use, the remote account password stays in the remote PAM conversation: Syn does not send it to the Mac, save it, or place it in command arguments.
+
+For manual administration, run your command normally, such as `sudo /usr/bin/python3 -I /path/to/script.py`, `sudo -i`, or `sudo -s`. Under the default policy, these commands require a fresh local password each time and do not create a remote approval request or wait for the Mac. Syn does not infer that a terminal belongs to a human: the password authorizes the original invocation, subject to sudoers and Syn's configuration and environment checks. A root shell grants control until you exit it; later commands inside that shell are not separate Syn approvals.
 
 ## How setup and connections work
 

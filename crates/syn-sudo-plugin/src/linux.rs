@@ -265,23 +265,19 @@ unsafe extern "C" fn plugin_check(
 
         // SAFETY: sudo owns this NULL-terminated array for this callback.
         let environment = unsafe { parse_array(run_envp, 4096)? };
-        if !policy
-            .allowed_modes
-            .iter()
-            .any(|mode| mode == &state.sudo_mode)
-        {
-            hard_notice("Syn denied this sudo operation mode.\n");
-            return Ok(0);
-        }
-        if policy.blocks_executable(&executable) {
-            hard_notice("Syn policy blocks direct root shells and interpreters.\n");
-            return Ok(0);
-        }
-
         // Environment policy failures are final, before signing, notification,
         // transport or PAM. Never rewrite sudo's already-normalized environment.
         validate_final_environment(&state, &command_info_map, &environment)?;
         let intent = build_intent(&state, &command_info_map, argv, environment)?;
+        if let Some(result) = check_command_policy(&state, &policy, &executable, || {
+            pam_authenticate_once(
+                &config.pam_service,
+                &state.invoking_user,
+                state.conversation,
+            )
+        })? {
+            return Ok(result);
+        }
         let target_key = read_signing_key(&config.target_private_key)?;
         let request =
             ApprovalRequestV1::new(config.target_id.clone(), target_key.verifying_key(), intent);
@@ -360,6 +356,32 @@ unsafe extern "C" fn plugin_check(
             }
         }
     })
+}
+
+// These restrictions select which commands may be approved remotely. A local
+// administrator can run the original sudo-authorized invocation with fresh PAM
+// authentication. A TTY is only a prerequisite for prompting, never proof of a
+// human caller. This path precedes request creation, so it cannot reopen a
+// remote denial, reuse a decision, or leave a pending request behind.
+fn check_command_policy(
+    state: &PluginState,
+    policy: &Policy,
+    executable: &[u8],
+    authenticate: impl FnOnce() -> Result<bool, &'static str>,
+) -> Result<Option<c_int>, &'static str> {
+    if policy.allowed_modes.contains(&state.sudo_mode) && !policy.blocks_executable(executable) {
+        return Ok(None);
+    }
+    let Some(_terminal) = PasswordEscape::open(state) else {
+        hard_notice(
+            "Syn requires an interactive terminal and this machine's password for this command. Rerun without -n in a terminal.\n",
+        );
+        return Ok(Some(0));
+    };
+    hard_notice(
+        "This command requires local authentication. Enter this machine's password to continue.\n",
+    );
+    authenticate().map(|authenticated| Some(c_int::from(authenticated)))
 }
 
 fn is_local_password_recovery(
@@ -1371,6 +1393,243 @@ unsafe fn free_pam_responses(responses: *mut PamResponse, initialized: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C" fn unused_conversation(
+        _num_msgs: c_int,
+        _msgs: *const SudoConvMessage,
+        _replies: *mut SudoConvReply,
+        _callback: *mut SudoConvCallback,
+    ) -> c_int {
+        // Fail closed if a test accidentally invokes a real PAM conversation.
+        -1
+    }
+
+    fn manual_state() -> PluginState {
+        PluginState {
+            conversation: unused_conversation,
+            invoking_uid: 1000,
+            invoking_gid: 1000,
+            invoking_user: "managed".into(),
+            pid: 123,
+            parent_pid: 122,
+            tty: None,
+            working_directory: b"/home/managed".to_vec(),
+            non_interactive: false,
+            sudo_mode: "run".into(),
+            config_path: DEFAULT_PLUGIN_CONFIG.into(),
+        }
+    }
+
+    fn interactive_state() -> (PluginState, OwnedFd, OwnedFd) {
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: descriptor outputs are writable; NULL uses default settings.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    ptr::null_mut(),
+                    ptr::null(),
+                    ptr::null(),
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two new, owned descriptors.
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let mut name = [0; 256];
+        // SAFETY: name is writable for its full capacity and slave is live.
+        assert_eq!(
+            unsafe { libc::ttyname_r(slave.as_raw_fd(), name.as_mut_ptr(), name.len()) },
+            0
+        );
+        let mut state = manual_state();
+        // SAFETY: successful ttyname_r writes a NUL-terminated string.
+        state.tty = Some(
+            unsafe { CStr::from_ptr(name.as_ptr()) }
+                .to_str()
+                .unwrap()
+                .into(),
+        );
+        assert!(PasswordEscape::open(&state).is_some());
+        (state, master, slave)
+    }
+
+    #[test]
+    fn manual_python_script_requires_fresh_password_for_each_invocation() {
+        let (state, _master, _slave) = interactive_state();
+        let policy = Policy::default();
+        let command_info = parse_key_value_bytes(vec![
+            b"command=/usr/bin/python3".to_vec(),
+            b"runas_uid=0".to_vec(),
+            b"runas_gid=0".to_vec(),
+        ])
+        .unwrap();
+        let argv = vec![
+            b"/usr/bin/python3".to_vec(),
+            b"-I".to_vec(),
+            b"/home/managed/Documents/Codex/script with spaces.py".to_vec(),
+        ];
+        let intent = build_intent(&state, &command_info, argv.clone(), vec![]).unwrap();
+        assert_eq!(intent.executable.as_slice(), b"/usr/bin/python3");
+        assert_eq!(
+            intent
+                .argv
+                .iter()
+                .map(|arg| arg.as_slice().to_vec())
+                .collect::<Vec<_>>(),
+            argv
+        );
+        let mut password_calls = 0;
+        for authenticated in [true, true, false] {
+            assert_eq!(
+                check_command_policy(&state, &policy, intent.executable.as_slice(), || {
+                    password_calls += 1;
+                    Ok(authenticated)
+                })
+                .unwrap(),
+                Some(c_int::from(authenticated)),
+            );
+        }
+        assert_eq!(
+            password_calls, 3,
+            "no reusable authorization from the first password"
+        );
+    }
+
+    #[test]
+    fn manual_shells_and_restricted_modes_use_local_password() {
+        let (mut state, _master, _slave) = interactive_state();
+        // The timeout fallback toggle must not prevent deliberate manual use.
+        let policy = Policy {
+            password_fallback_on_timeout: false,
+            ..Policy::default()
+        };
+        for executable in &policy.blocked_executables {
+            let executable = format!("/usr/bin/{executable}");
+            assert_eq!(
+                check_command_policy(&state, &policy, executable.as_bytes(), || Ok(true)).unwrap(),
+                Some(1)
+            );
+        }
+        for (setting, mode) in [
+            ("run_shell", "shell"),
+            ("implied_shell", "shell"),
+            ("login_shell", "login_shell"),
+            ("sudoedit", "edit"),
+        ] {
+            state.sudo_mode =
+                detect_mode(&BTreeMap::from([(setting.into(), b"true".to_vec())])).unwrap();
+            assert_eq!(state.sudo_mode, mode);
+            // Even a command outside the executable blocklist needs local PAM
+            // when its sudo mode is not eligible for remote approval.
+            assert_eq!(
+                check_command_policy(&state, &policy, b"/usr/bin/id", || Ok(true)).unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                check_command_policy(&state, &policy, b"/bin/bash", || Ok(true)).unwrap(),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
+    fn manual_password_failure_or_error_denies() {
+        let (state, _master, _slave) = interactive_state();
+        assert_eq!(
+            check_command_policy(&state, &Policy::default(), b"/bin/bash", || Ok(false)).unwrap(),
+            Some(0)
+        );
+        assert!(
+            check_command_policy(&state, &Policy::default(), b"/bin/bash", || Err(
+                "synthetic PAM failure"
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn restricted_commands_without_interactive_terminal_never_authenticate() {
+        let policy = Policy::default();
+        let denied = |state: &PluginState| {
+            assert_eq!(
+                check_command_policy(state, &policy, b"/usr/bin/python3", || {
+                    panic!("must not authenticate without an interactive terminal")
+                })
+                .unwrap(),
+                Some(0)
+            );
+        };
+        let mut state = manual_state();
+        denied(&state);
+        for path in ["/dev/null", "/dev/does-not-exist", "/etc/passwd"] {
+            state.tty = Some(path.into());
+            denied(&state);
+        }
+        let regular = fs::File::open("/etc/passwd").unwrap();
+        state.tty = Some(format!("/dev/fd/{}", regular.as_raw_fd()));
+        denied(&state);
+        let mut pipe = [-1; 2];
+        // SAFETY: pipe has space for the two returned descriptors.
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned new, owned descriptors.
+        let reader = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        let _writer = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        state.tty = Some(format!("/dev/fd/{}", reader.as_raw_fd()));
+        denied(&state);
+
+        let (mut state, _master, slave) = interactive_state();
+        state.non_interactive = true;
+        denied(&state);
+        state.non_interactive = false;
+        let mut settings = unsafe { std::mem::zeroed::<libc::termios>() };
+        // SAFETY: slave is live and settings has the correct layout.
+        assert_eq!(
+            unsafe { libc::tcgetattr(slave.as_raw_fd(), &mut settings) },
+            0
+        );
+        settings.c_lflag &= !libc::ICANON;
+        assert_eq!(
+            unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &settings) },
+            0
+        );
+        denied(&state);
+    }
+
+    #[test]
+    fn eligible_commands_keep_remote_approval_path() {
+        let mut state = manual_state();
+        for non_interactive in [true, false] {
+            state.non_interactive = non_interactive;
+            for policy in [
+                Policy::default(),
+                Policy {
+                    allow_interactive_root: true,
+                    ..Policy::default()
+                },
+            ] {
+                assert_eq!(
+                    check_command_policy(&state, &policy, b"/usr/bin/id", || panic!(
+                        "eligible commands use the remote path"
+                    ))
+                    .unwrap(),
+                    None
+                );
+                if policy.allow_interactive_root {
+                    assert_eq!(
+                        check_command_policy(&state, &policy, b"/bin/bash", || panic!(
+                            "respect explicit remote policy"
+                        ))
+                        .unwrap(),
+                        None
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn target_environment_defaults_use_real_nss_without_authentication() {
